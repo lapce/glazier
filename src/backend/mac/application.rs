@@ -152,6 +152,12 @@ impl DelegateState {
             inner.command(command)
         }
     }
+
+    fn will_terminate(&mut self) {
+        if let Some(inner) = self.handler.as_mut() {
+            inner.will_terminate()
+        }
+    }
 }
 
 struct AppDelegate(*const Class);
@@ -173,6 +179,12 @@ lazy_static! {
             sel!(handleMenuItem:),
             handle_menu_item as extern "C" fn(&mut Object, Sel, id),
         );
+
+        decl.add_method(
+            sel!(applicationWillTerminate:),
+            will_terminate as extern "C" fn(&mut Object, Sel, id),
+        );
+
         AppDelegate(decl.register())
     };
 }
@@ -194,5 +206,13 @@ extern "C" fn handle_menu_item(this: &mut Object, _: Sel, item: id) {
         let inner: *mut c_void = *this.get_ivar(APP_HANDLER_IVAR);
         let inner = &mut *(inner as *mut DelegateState);
         (*inner).command(tag as u32);
+    }
+}
+
+extern "C" fn will_terminate(this: &mut Object, _: Sel, _item: id) {
+    unsafe {
+        let inner: *mut c_void = *this.get_ivar(APP_HANDLER_IVAR);
+        let inner = &mut *(inner as *mut DelegateState);
+        (*inner).will_terminate();
     }
 }

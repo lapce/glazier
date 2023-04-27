@@ -177,6 +177,7 @@ enum IdleKind {
 
 /// This is the state associated with our custom NSView.
 struct ViewState {
+    nswindow: WeakPtr,
     nsview: WeakPtr,
     handler: Box<dyn WinHandler>,
     idle_queue: Arc<Mutex<Vec<IdleKind>>>,
@@ -309,7 +310,7 @@ impl WindowBuilder {
 
             window.setTitle_(make_nsstring(&self.title));
 
-            let (view, idle_queue) = make_view(self.handler.expect("view"));
+            let (view, idle_queue) = make_view(window, self.handler.expect("view"));
             let content_view = window.contentView();
             let frame = NSView::frame(content_view);
             view.initWithFrame_(frame);
@@ -516,6 +517,10 @@ lazy_static! {
             sel!(windowWillClose:),
             window_will_close as extern "C" fn(&mut Object, Sel, id),
         );
+        decl.add_method(
+            sel!(windowDidMove:),
+            window_did_move as extern "C" fn(&mut Object, Sel, id),
+        );
 
         #[cfg(feature = "accesskit")]
         {
@@ -627,7 +632,7 @@ pub(super) fn with_edit_lock_from_window<R>(
     Some(r)
 }
 
-fn make_view(handler: Box<dyn WinHandler>) -> (id, Weak<Mutex<Vec<IdleKind>>>) {
+fn make_view(window: id, handler: Box<dyn WinHandler>) -> (id, Weak<Mutex<Vec<IdleKind>>>) {
     let idle_queue = Arc::new(Mutex::new(Vec::new()));
     let queue_handle = Arc::downgrade(&idle_queue);
     unsafe {
@@ -635,6 +640,7 @@ fn make_view(handler: Box<dyn WinHandler>) -> (id, Weak<Mutex<Vec<IdleKind>>>) {
         let nsview = WeakPtr::new(view);
         let keyboard_state = KeyboardState::new();
         let state = ViewState {
+            nswindow: WeakPtr::new(window),
             nsview,
             handler,
             idle_queue,
@@ -1121,6 +1127,18 @@ extern "C" fn window_will_close(this: &mut Object, _: Sel, _notification: id) {
         let view_state: *mut c_void = *this.get_ivar("viewState");
         let view_state = &mut *(view_state as *mut ViewState);
         view_state.handler.destroy();
+    }
+}
+
+extern "C" fn window_did_move(this: &mut Object, _: Sel, _notification: id) {
+    unsafe {
+        let view_state: *mut c_void = *this.get_ivar("viewState");
+        let view_state = &mut *(view_state as *mut ViewState);
+
+        let rect = NSWindow::frame(*(*view_state).nswindow.load());
+        (*view_state)
+            .handler
+            .position(Point::new(rect.origin.x, rect.origin.y));
     }
 }
 

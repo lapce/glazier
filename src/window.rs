@@ -565,6 +565,10 @@ pub trait WinHandler {
     #[allow(unused_variables)]
     fn size(&mut self, size: Size) {}
 
+    /// Called when the position of the window has changed.
+    #[allow(unused_variables)]
+    fn position(&mut self, point: Point) {}
+
     /// Called when the [scale](crate::Scale) of the window has changed.
     ///
     /// This is always called before the accompanying [`size`](WinHandler::size).

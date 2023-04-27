@@ -1135,8 +1135,8 @@ extern "C" fn window_did_move(this: &mut Object, _: Sel, _notification: id) {
         let view_state: *mut c_void = *this.get_ivar("viewState");
         let view_state = &mut *(view_state as *mut ViewState);
 
-        let rect = NSWindow::frame(*(*view_state).nswindow.load());
-        (*view_state)
+        let rect = NSWindow::frame(*view_state.nswindow.load());
+        view_state
             .handler
             .position(Point::new(rect.origin.x, rect.origin.y));
     }

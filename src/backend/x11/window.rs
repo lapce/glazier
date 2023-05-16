@@ -23,6 +23,7 @@ use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::backend::shared::linux::dialog;
 use crate::pointer::{
     Angle, MouseInfo, PenInclination, PenInfo, PointerId, PointerType, TouchInfo,
 };
@@ -63,7 +64,6 @@ use crate::window::{
 use crate::{window, KeyEvent, PointerButton, PointerButtons, PointerEvent, ScaledArea};
 
 use super::application::Application;
-use super::dialog;
 use super::menu::Menu;
 
 /// A version of XCB's `xcb_visualtype_t` struct. This was copied from the [example] in x11rb; it
@@ -274,7 +274,12 @@ impl WindowBuilder {
             WindowLevel::Tooltip(parent)
             | WindowLevel::DropDown(parent)
             | WindowLevel::Modal(parent) => {
-                let handle = parent.0.window.clone();
+                let handle = match &parent.0 {
+                    crate::backend::window::WindowHandle::X11(handle) => handle.window.clone(),
+                    crate::backend::window::WindowHandle::Wayland(_) => {
+                        return Err(Error::msg("wrong window handle"))
+                    }
+                };
                 let origin = handle
                     .upgrade()
                     .map(|x| x.get_position())
@@ -530,6 +535,7 @@ impl Window {
         let size = self.size().size_dp();
         let scale = self.scale.get();
         self.with_handler(|h| {
+            let handle = crate::backend::window::WindowHandle::X11(handle);
             h.connect(&handle.into());
             h.scale(scale);
             h.size(size);
@@ -757,7 +763,10 @@ impl Window {
             Cursor::NotAllowed => cursors.not_allowed,
             Cursor::ResizeLeftRight => cursors.col_resize,
             Cursor::ResizeUpDown => cursors.row_resize,
-            Cursor::Custom(custom) => Some(custom.0),
+            Cursor::Custom(custom) => match custom {
+                crate::backend::window::CustomCursor::X11(custom) => Some(custom.0),
+                crate::backend::window::CustomCursor::Wayland(_) => None,
+            },
         };
         if cursor.is_none() {
             warn!("Unable to load cursor {:?}", cursor);
@@ -1407,27 +1416,25 @@ impl WindowHandle {
     }
 
     pub fn open_file(&mut self, options: FileDialogOptions) -> Option<FileDialogToken> {
-        if let Some(w) = self.window.upgrade() {
-            if let Some(idle) = self.get_idle_handle() {
-                Some(dialog::open_file(w.id, idle, options))
-            } else {
-                warn!("Couldn't open file because no idle handle available");
-                None
-            }
+        if let Some(idle) = self.get_idle_handle() {
+            let idle = crate::IdleHandle(crate::backend::window::IdleHandle::X11(idle));
+            let window = self.raw_window_handle();
+            let display = self.raw_display_handle();
+            Some(dialog::open_file(window, display, idle, options))
         } else {
+            warn!("Couldn't open file because no idle handle available");
             None
         }
     }
 
     pub fn save_as(&mut self, options: FileDialogOptions) -> Option<FileDialogToken> {
-        if let Some(w) = self.window.upgrade() {
-            if let Some(idle) = self.get_idle_handle() {
-                Some(dialog::save_file(w.id, idle, options))
-            } else {
-                warn!("Couldn't save file because no idle handle available");
-                None
-            }
+        if let Some(idle) = self.get_idle_handle() {
+            let idle = crate::IdleHandle(crate::backend::window::IdleHandle::X11(idle));
+            let window = self.raw_window_handle();
+            let display = self.raw_display_handle();
+            Some(dialog::save_file(window, display, idle, options))
         } else {
+            warn!("Couldn't save file because no idle handle available");
             None
         }
     }

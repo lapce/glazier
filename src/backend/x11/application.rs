@@ -837,7 +837,14 @@ impl AppInner {
 
 impl crate::platform::linux::ApplicationExt for crate::Application {
     fn primary_clipboard(&self) -> crate::Clipboard {
-        self.backend_app.inner.primary.clone().into()
+        match &self.backend_app {
+            crate::backend::application::Application::X11(app) => {
+                crate::backend::clipboard::Clipboard::X11(app.inner.primary.clone()).into()
+            }
+            crate::backend::application::Application::Wayland(app) => {
+                crate::backend::clipboard::Clipboard::Wayland(app.clipboard()).into()
+            }
+        }
     }
 }
 

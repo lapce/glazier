@@ -434,35 +434,33 @@ impl Application {
         })
     }
 
-    pub fn run(mut self, _handler: Option<Box<dyn AppHandler>>) {
+    pub fn run(self, _handler: Option<Box<dyn AppHandler>>) {
         tracing::info!("wayland event loop initiated");
         // NOTE if we want to call this function more than once, we will need to put the timer
         // source back.
-        let timer_source = self.data.borrow().timer_source.borrow_mut().take().unwrap();
+        // let timer_source = self.data.borrow().timer_source.borrow_mut().take().unwrap();
         // flush pending events (otherwise anything we submitted since sync will never be sent)
-        self.data.borrow().wayland.display.flush().unwrap();
+        // self.data.borrow().wayland.display.flush().unwrap();
 
         // Use calloop so we can epoll both wayland events and others (e.g. timers)
-        let mut eventloop = calloop::EventLoop::try_new().unwrap();
-        let handle = eventloop.handle();
+        // let eventloop = calloop::EventLoop::try_new().unwrap();
+        // let handle = eventloop.handle();
 
-        let wayland_dispatcher = WaylandSource::new(self.data.clone()).into_dispatcher();
+        // let wayland_dispatcher = WaylandSource::new(self.data.clone()).into_dispatcher();
 
-        self.data.borrow().keyboard.events(&handle);
+        // self.data.borrow().keyboard.events(&handle);
 
-        handle.register_dispatcher(wayland_dispatcher).unwrap();
+        // handle.register_dispatcher(wayland_dispatcher).unwrap();
 
-        handle
-            .insert_source(timer_source, move |token, _metadata, appdata| {
-                tracing::trace!("timer source {:?}", token);
-                appdata.handle_timer_event(token);
-            })
-            .unwrap();
-
-        let signal = eventloop.get_signal();
-        let handle = handle.clone();
+        // handle
+        //     .insert_source(timer_source, move |token, _metadata, appdata| {
+        //         tracing::trace!("timer source {:?}", token);
+        //         appdata.handle_timer_event(token);
+        //     })
+        //     .unwrap();
 
         let mut event_loop = self.event_loop.borrow_mut();
+        let handle = event_loop.handle();
         let mut data = self.data.borrow_mut();
         loop {
             event_loop
@@ -472,6 +470,13 @@ impl Application {
             if data.shutdown.get() {
                 break;
             }
+
+            handle.insert_idle(move |data| {
+                for (_id, winhandle) in data.handles_iter() {
+                    winhandle.run_idle();
+                    winhandle.redraw();
+                }
+            });
         }
     }
 

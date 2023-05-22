@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use sctk_adwaita::AdwaitaFrame;
 use smithay_client_toolkit::{
-    compositor::{CompositorState, Region},
+    compositor::{CompositorState, Region, SurfaceData},
     reexports::{
         client::{protocol::wl_surface::WlSurface, Proxy, QueueHandle},
         protocols::wp::viewporter::client::wp_viewport::WpViewport,
@@ -46,9 +46,9 @@ use raw_window_handle::{
     WaylandDisplayHandle, WaylandWindowHandle,
 };
 
-use super::application::Data;
 use super::application::{self, Timer};
 use super::surfaces::idle;
+use super::{application::Data, output::MonitorHandle};
 use super::{error::Error, menu::Menu, outputs, surfaces};
 
 use crate::{
@@ -74,6 +74,8 @@ struct Inner {
 
     pub(super) compositor_state: Arc<CompositorState>,
 
+    pub(super) handler: Rc<RefCell<Box<dyn window::WinHandler>>>,
+
     /// The window frame, which is created from the configure request.
     frame: Option<AdwaitaFrame<Data>>,
 
@@ -91,6 +93,8 @@ struct Inner {
 
     /// Whether the CSD fail to create, so we don't try to create them on each iteration.
     csd_fails: bool,
+
+    needs_redraw: bool,
 
     /// The size of the window when no states were applied to it. The primary use for it
     /// is to fallback to original window size, before it was maximized, if the compositor
@@ -367,18 +371,41 @@ impl WindowHandle {
 
     /// Request a new paint, but without invalidating anything.
     pub fn request_anim_frame(&self) {
-        // self.inner.surface.request_anim_frame();
+        if let Some(inner) = self.inner.borrow_mut().as_mut() {
+            inner.needs_redraw = true;
+        }
+    }
+
+    pub fn redraw(&self) {
+        let mut needs_redraw = false;
+        let mut handler = None;
+        if let Some(inner) = self.inner.borrow_mut().as_mut() {
+            if inner.needs_redraw {
+                needs_redraw = true;
+                handler = Some(inner.handler.clone());
+                inner.needs_redraw = false;
+            }
+        }
+
+        if needs_redraw {
+            let mut handler = handler.as_ref().unwrap().borrow_mut();
+            handler.paint(&crate::region::Region::EMPTY);
+        }
     }
 
     /// Request invalidation of the entire window contents.
     pub fn invalidate(&self) {
-        // self.inner.surface.invalidate();
+        if let Some(inner) = self.inner.borrow_mut().as_mut() {
+            inner.needs_redraw = true;
+        }
     }
 
     /// Request invalidation of one rectangle, which is given in display points relative to the
     /// drawing area.
-    pub fn invalidate_rect(&self, rect: Rect) {
-        // self.inner.surface.invalidate_rect(rect);
+    pub fn invalidate_rect(&self, _rect: Rect) {
+        if let Some(inner) = self.inner.borrow_mut().as_mut() {
+            inner.needs_redraw = true;
+        }
     }
 
     pub fn add_text_field(&self) -> TextFieldToken {
@@ -462,9 +489,28 @@ impl WindowHandle {
         })
     }
 
+    pub fn current_monitor(&self) -> Option<MonitorHandle> {
+        let inner = self.inner.borrow();
+
+        inner
+            .as_ref()
+            .and_then(|inner| inner.window.wl_surface().data::<SurfaceData>())
+            .and_then(|data| data.outputs().next())
+            .map(MonitorHandle::new)
+    }
+
     /// Get the `Scale` of the window.
     pub fn get_scale(&self) -> Result<Scale, ShellError> {
-        todo!()
+        self.current_monitor()
+            .map(|monitor| {
+                let scale = monitor.scale_factor();
+                Scale::new(scale as f64, scale as f64)
+            })
+            .ok_or_else(|| {
+                ShellError::Platform(crate::backend::linux::error::Error::Wayland(Error::string(
+                    "wayland can't get current monitor",
+                )))
+            })
     }
 
     pub fn set_menu(&self, _menu: Menu) {
@@ -481,8 +527,14 @@ impl WindowHandle {
         }
     }
 
+    fn handler(&self) -> Rc<RefCell<Box<dyn WinHandler>>> {
+        self.inner.borrow().as_ref().unwrap().handler.clone()
+    }
+
     pub(super) fn run_idle(&self) {
-        todo!()
+        let handler = self.handler();
+        let mut handler = handler.borrow_mut();
+        idle::run(&self.get_idle_handle().unwrap(), &mut **handler);
     }
 
     pub(super) fn data(&self) -> Option<std::sync::Arc<surfaces::surface::Data>> {
@@ -636,7 +688,9 @@ impl WindowBuilder {
             return self.create_popup(parent);
         }
 
-        let mut handler = self.handler.expect("must set a window handler");
+        let handler = Rc::new(RefCell::new(
+            self.handler.expect("must set a window handler"),
+        ));
 
         let mut appdata = self.app.data.borrow_mut();
         let window = {
@@ -658,6 +712,7 @@ impl WindowBuilder {
             inner: Rc::new(RefCell::new(Some(Inner {
                 id: make_wid(window.wl_surface()),
                 window,
+                handler: handler.clone(),
                 queue_handle: appdata.queue_handle.clone(),
                 compositor_state: appdata.compositor_state.clone(),
                 frame: None,
@@ -667,6 +722,7 @@ impl WindowBuilder {
                 size: self.size,
                 csd_fails: false,
                 stateless_size: self.size,
+                needs_redraw: true,
                 viewport: None,
                 appdata: self.app.data.clone(),
                 idle_queue: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
@@ -712,11 +768,9 @@ impl WindowBuilder {
 
         println!("window configured");
 
-        {
-            let handle = handle.clone();
-            let handle = crate::backend::window::WindowHandle::Wayland(handle);
-            handler.connect(&handle.into());
-        }
+        handler
+            .borrow_mut()
+            .connect(&(crate::backend::window::WindowHandle::Wayland(handle.clone()).into()));
 
         Ok(handle)
     }

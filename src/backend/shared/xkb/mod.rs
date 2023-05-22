@@ -91,7 +91,7 @@ impl Context {
         unsafe {
             let keymap = xkb_keymap_new_from_string(
                 self.0,
-                buffer.as_ptr() as *const i8,
+                buffer.as_ptr() as *const u8,
                 XKB_KEYMAP_FORMAT_TEXT_V1,
                 XKB_KEYMAP_COMPILE_NO_FLAGS,
             );

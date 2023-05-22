@@ -118,7 +118,7 @@ impl GlobalEventDispatch for std::sync::Arc<Environment> {
 
 pub(super) fn new(dispatcher: Dispatcher) -> Result<Environment, error::Error> {
     let dispatcher = std::sync::Arc::new(dispatcher);
-    let d = wlc::Display::connect_to_env()?;
+    let d = wlc::Display::connect_to_env().unwrap();
 
     let mut queue = d.create_event_queue();
     let handle = d.attach(queue.token());
@@ -137,7 +137,7 @@ pub(super) fn new(dispatcher: Dispatcher) -> Result<Environment, error::Error> {
     // 3 is the max version supported by wayland-rs 0.29.5
     let xdg_base = registry
         .instantiate_range::<xdg_wm_base::XdgWmBase>(1, 3)
-        .map_err(|e| error::Error::global("xdg_wm_base", 1, e))?;
+        .unwrap();
 
     // We do this to make sure wayland knows we're still responsive.
     //

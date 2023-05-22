@@ -13,6 +13,29 @@
 
 #![allow(clippy::single_match)]
 
+use std::cell::RefCell;
+use std::num::NonZeroU32;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use sctk_adwaita::AdwaitaFrame;
+use smithay_client_toolkit::{
+    compositor::{CompositorState, Region},
+    reexports::{
+        client::{protocol::wl_surface::WlSurface, Proxy, QueueHandle},
+        protocols::wp::viewporter::client::wp_viewport::WpViewport,
+    },
+    shell::{
+        xdg::{
+            frame::DecorationsFrame,
+            window::{DecorationMode, Window, WindowConfigure, WindowDecorations},
+            XdgSurface,
+        },
+        WaylandSurface,
+    },
+    shm::Shm,
+    subcompositor::SubcompositorState,
+};
 use tracing;
 use wayland_protocols::xdg_shell::client::xdg_popup;
 use wayland_protocols::xdg_shell::client::xdg_positioner;
@@ -23,7 +46,9 @@ use raw_window_handle::{
     WaylandDisplayHandle, WaylandWindowHandle,
 };
 
+use super::application::Data;
 use super::application::{self, Timer};
+use super::surfaces::idle;
 use super::{error::Error, menu::Menu, outputs, surfaces};
 
 use crate::{
@@ -42,26 +67,72 @@ pub use surfaces::idle::Handle as IdleHandle;
 // holds references to the various components for a window implementation.
 struct Inner {
     pub(super) id: u64,
-    pub(super) decor: Box<dyn surfaces::Decor>,
-    pub(super) surface: Box<dyn surfaces::Handle>,
-    pub(super) outputs: Box<dyn surfaces::Outputs>,
-    pub(super) popup: Box<dyn surfaces::Popup>,
-    pub(super) appdata: std::sync::Weak<application::Data>,
+    /// Reference to the underlying SCTK window.
+    pub(super) window: Window,
+
+    pub(super) queue_handle: QueueHandle<Data>,
+
+    pub(super) compositor_state: Arc<CompositorState>,
+
+    /// The window frame, which is created from the configure request.
+    frame: Option<AdwaitaFrame<Data>>,
+
+    /// The last received configure.
+    pub last_configure: Option<WindowConfigure>,
+
+    /// The current window title.
+    title: String,
+
+    /// Whether the window is transparent.
+    transparent: bool,
+
+    /// The inner size of the window, as in without client side decorations.
+    size: Size,
+
+    /// Whether the CSD fail to create, so we don't try to create them on each iteration.
+    csd_fails: bool,
+
+    /// The size of the window when no states were applied to it. The primary use for it
+    /// is to fallback to original window size, before it was maximized, if the compositor
+    /// sends `None` for the new size in the configure.
+    stateless_size: Size,
+
+    viewport: Option<WpViewport>,
+
+    // pub(super) decor: Box<dyn surfaces::Decor>,
+    // pub(super) surface: Box<dyn surfaces::Handle>,
+    // pub(super) outputs: Box<dyn surfaces::Outputs>,
+    // pub(super) popup: Box<dyn surfaces::Popup>,
+    pub(super) appdata: Rc<RefCell<application::Data>>,
+
+    idle_queue: std::sync::Arc<std::sync::Mutex<Vec<idle::Kind>>>,
+}
+
+impl Inner {
+    /// Reissue the transparency hint to the compositor.
+    pub fn reload_transparency_hint(&self) {
+        let surface = self.window.wl_surface();
+
+        if self.transparent {
+            surface.set_opaque_region(None);
+        } else if let Ok(region) = Region::new(&*self.compositor_state) {
+            region.add(0, 0, i32::MAX, i32::MAX);
+            surface.set_opaque_region(Some(region.wl_region()));
+        } else {
+            tracing::trace!("Failed to mark window opaque.");
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct WindowHandle {
-    inner: std::sync::Arc<Inner>,
+    inner: Rc<RefCell<Option<Inner>>>,
 }
 
 impl surfaces::Outputs for WindowHandle {
-    fn removed(&self, o: &outputs::Meta) {
-        self.inner.outputs.removed(o)
-    }
+    fn removed(&self, o: &outputs::Meta) {}
 
-    fn inserted(&self, o: &outputs::Meta) {
-        self.inner.outputs.inserted(o)
-    }
+    fn inserted(&self, o: &outputs::Meta) {}
 }
 
 impl surfaces::Popup for WindowHandle {
@@ -70,7 +141,7 @@ impl surfaces::Popup for WindowHandle {
         popup: &wayland_client::Main<xdg_surface::XdgSurface>,
         pos: &wayland_client::Main<xdg_positioner::XdgPositioner>,
     ) -> Result<wayland_client::Main<xdg_popup::XdgPopup>, Error> {
-        self.inner.popup.surface(popup, pos)
+        Err(Error::string("no popup"))
     }
 }
 
@@ -80,22 +151,102 @@ impl WindowHandle {
         decor: impl Into<Box<dyn surfaces::Decor>>,
         surface: impl Into<Box<dyn surfaces::Handle>>,
         popup: impl Into<Box<dyn surfaces::Popup>>,
-        appdata: impl Into<std::sync::Weak<application::Data>>,
+        appdata: Rc<RefCell<application::Data>>,
     ) -> Self {
         Self {
-            inner: std::sync::Arc::new(Inner {
-                id: surfaces::GLOBAL_ID.next(),
-                outputs: outputs.into(),
-                decor: decor.into(),
-                surface: surface.into(),
-                popup: popup.into(),
-                appdata: appdata.into(),
-            }),
+            inner: Rc::new(RefCell::new(None)),
         }
     }
 
+    pub fn configure(
+        &self,
+        configure: WindowConfigure,
+        shm: &Shm,
+        subcompositor: &Arc<SubcompositorState>,
+    ) -> Size {
+        let new_size = {
+            let mut inner = self.inner.borrow_mut();
+            let inner = inner.as_mut().unwrap();
+            if configure.decoration_mode == DecorationMode::Client
+                && inner.frame.is_none()
+                && !inner.csd_fails
+            {
+                match AdwaitaFrame::new(
+                    &inner.window,
+                    shm,
+                    subcompositor.clone(),
+                    inner.queue_handle.clone(),
+                    sctk_adwaita::FrameConfig::auto(),
+                ) {
+                    Ok(mut frame) => {
+                        frame.set_title(&inner.title);
+                        // Ensure that the frame is not hidden.
+                        frame.set_hidden(false);
+                        inner.frame = Some(frame);
+                    }
+                    Err(err) => {
+                        tracing::trace!("Failed to create client side decorations frame: {err}");
+                        inner.csd_fails = true;
+                    }
+                }
+            } else if configure.decoration_mode == DecorationMode::Server {
+                // Drop the frame for server side decorations to save resources.
+                inner.frame = None;
+            }
+
+            let stateless = Self::is_stateless(&configure);
+
+            let new_size = if let Some(frame) = inner.frame.as_mut() {
+                // Configure the window states.
+                frame.update_state(configure.state);
+
+                match configure.new_size {
+                    (Some(width), Some(height)) => {
+                        let (width, height) = frame.subtract_borders(width, height);
+                        (
+                            width.map(|w| w.get()).unwrap_or(1) as f64,
+                            height.map(|h| h.get()).unwrap_or(1) as f64,
+                        )
+                            .into()
+                    }
+                    (_, _) if stateless => inner.stateless_size,
+                    _ => inner.size,
+                }
+            } else {
+                match configure.new_size {
+                    (Some(width), Some(height)) => (width.get() as f64, height.get() as f64).into(),
+                    _ if stateless => inner.stateless_size,
+                    _ => inner.size,
+                }
+            };
+
+            // XXX Set the configure before doing a resize.
+            inner.last_configure = Some(configure);
+
+            new_size
+        };
+
+        // XXX Update the new size right away.
+        self.set_size(new_size);
+
+        new_size
+    }
+
+    pub fn is_configured(&self) -> bool {
+        let inner = self.inner.borrow();
+        inner
+            .as_ref()
+            .map(|inner| inner.last_configure.is_some())
+            .unwrap_or(false)
+    }
+
+    #[inline]
+    fn is_stateless(configure: &WindowConfigure) -> bool {
+        !(configure.is_maximized() || configure.is_fullscreen() || configure.is_tiled())
+    }
+
     pub fn id(&self) -> u64 {
-        self.inner.id
+        self.inner.borrow().as_ref().unwrap().id
     }
 
     pub fn show(&self) {
@@ -124,11 +275,58 @@ impl WindowHandle {
     }
 
     pub fn set_size(&self, size: Size) {
-        self.inner.surface.set_size(size);
+        if let Some(inner) = self.inner.borrow_mut().as_mut() {
+            inner.size = size;
+
+            // Update the stateless size.
+            if Some(true) == inner.last_configure.as_ref().map(Self::is_stateless) {
+                inner.stateless_size = size;
+            }
+
+            // Update the inner frame.
+            let ((x, y), outer_size) = if let Some(frame) = inner.frame.as_mut() {
+                // Resize only visible frame.
+                if !frame.is_hidden() {
+                    frame.resize(
+                        NonZeroU32::new(inner.size.width as u32).unwrap(),
+                        NonZeroU32::new(inner.size.height as u32).unwrap(),
+                    );
+                }
+
+                (frame.location(), {
+                    let (width, height) =
+                        frame.add_borders(inner.size.width as u32, inner.size.height as u32);
+                    (width as f64, height as f64).into()
+                })
+            } else {
+                ((0, 0), inner.size)
+            };
+
+            // Reload the hint.
+            inner.reload_transparency_hint();
+
+            // Set the window geometry.
+            inner.window.xdg_surface().set_window_geometry(
+                x,
+                y,
+                outer_size.width as i32,
+                outer_size.height as i32,
+            );
+
+            // Update the target viewport, this is used if and only if fractional scaling is in use.
+            if let Some(viewport) = inner.viewport.as_ref() {
+                // Set inner size without the borders.
+                viewport.set_destination(inner.size.width as _, inner.size.height as _);
+            }
+        }
     }
 
     pub fn get_size(&self) -> Size {
-        self.inner.surface.get_size()
+        if let Some(inner) = self.inner.borrow().as_ref() {
+            inner.size
+        } else {
+            Size::ZERO
+        }
     }
 
     pub fn set_window_state(&mut self, _current_state: window::WindowState) {
@@ -146,14 +344,15 @@ impl WindowHandle {
 
     /// Close the window.
     pub fn close(&self) {
-        if let Some(appdata) = self.inner.appdata.upgrade() {
+        if let Some(inner) = self.inner.borrow().as_ref() {
+            let appdata = inner.appdata.borrow();
             tracing::trace!(
                 "closing window initiated {:?}",
                 appdata.active_surface_id.borrow()
             );
             appdata.handles.borrow_mut().remove(&self.id());
             appdata.active_surface_id.borrow_mut().pop_front();
-            self.inner.surface.release();
+            inner.window.wl_surface().destroy();
             tracing::trace!(
                 "closing window completed {:?}",
                 appdata.active_surface_id.borrow()
@@ -168,18 +367,18 @@ impl WindowHandle {
 
     /// Request a new paint, but without invalidating anything.
     pub fn request_anim_frame(&self) {
-        self.inner.surface.request_anim_frame();
+        // self.inner.surface.request_anim_frame();
     }
 
     /// Request invalidation of the entire window contents.
     pub fn invalidate(&self) {
-        self.inner.surface.invalidate();
+        // self.inner.surface.invalidate();
     }
 
     /// Request invalidation of one rectangle, which is given in display points relative to the
     /// drawing area.
     pub fn invalidate_rect(&self, rect: Rect) {
-        self.inner.surface.invalidate_rect(rect);
+        // self.inner.surface.invalidate_rect(rect);
     }
 
     pub fn add_text_field(&self) -> TextFieldToken {
@@ -187,11 +386,11 @@ impl WindowHandle {
     }
 
     pub fn remove_text_field(&self, token: TextFieldToken) {
-        self.inner.surface.remove_text_field(token);
+        // self.inner.surface.remove_text_field(token);
     }
 
     pub fn set_focused_text_field(&self, active_field: Option<TextFieldToken>) {
-        self.inner.surface.set_focused_text_field(active_field);
+        // self.inner.surface.set_focused_text_field(active_field);
     }
 
     pub fn update_text_field(&self, _token: TextFieldToken, _update: Event) {
@@ -199,13 +398,15 @@ impl WindowHandle {
     }
 
     pub fn request_timer(&self, deadline: std::time::Instant) -> TimerToken {
-        let appdata = match self.inner.appdata.upgrade() {
-            Some(d) => d,
+        let inner = self.inner.borrow();
+        let inner = match inner.as_ref() {
+            Some(i) => i,
             None => {
                 tracing::warn!("requested timer on a window that was destroyed");
                 return Timer::new(self.id(), deadline).token();
             }
         };
+        let appdata = inner.appdata.borrow();
 
         let now = instant::Instant::now();
         let mut timers = appdata.timers.borrow_mut();
@@ -233,8 +434,8 @@ impl WindowHandle {
     }
 
     pub fn set_cursor(&mut self, cursor: &Cursor) {
-        if let Some(appdata) = self.inner.appdata.upgrade() {
-            appdata.set_cursor(cursor);
+        if let Some(inner) = self.inner.borrow().as_ref() {
+            inner.appdata.borrow().set_cursor(cursor);
         }
     }
 
@@ -255,12 +456,15 @@ impl WindowHandle {
 
     /// Get a handle that can be used to schedule an idle task.
     pub fn get_idle_handle(&self) -> Option<IdleHandle> {
-        Some(self.inner.surface.get_idle_handle())
+        let inner = self.inner.borrow();
+        inner.as_ref().map(|inner| idle::Handle {
+            queue: inner.idle_queue.clone(),
+        })
     }
 
     /// Get the `Scale` of the window.
     pub fn get_scale(&self) -> Result<Scale, ShellError> {
-        Ok(self.inner.surface.get_scale())
+        todo!()
     }
 
     pub fn set_menu(&self, _menu: Menu) {
@@ -272,15 +476,17 @@ impl WindowHandle {
     }
 
     pub fn set_title(&self, title: impl Into<String>) {
-        self.inner.decor.set_title(title);
+        if let Some(inner) = self.inner.borrow().as_ref() {
+            inner.window.set_title(title);
+        }
     }
 
     pub(super) fn run_idle(&self) {
-        self.inner.surface.run_idle();
+        todo!()
     }
 
     pub(super) fn data(&self) -> Option<std::sync::Arc<surfaces::surface::Data>> {
-        self.inner.surface.data()
+        todo!()
     }
 
     #[cfg(feature = "accesskit")]
@@ -303,14 +509,7 @@ impl Eq for WindowHandle {}
 impl Default for WindowHandle {
     fn default() -> WindowHandle {
         WindowHandle {
-            inner: std::sync::Arc::new(Inner {
-                id: surfaces::GLOBAL_ID.next(),
-                outputs: Box::<surfaces::surface::Dead>::default(),
-                decor: Box::<surfaces::surface::Dead>::default(),
-                surface: Box::<surfaces::surface::Dead>::default(),
-                popup: Box::<surfaces::surface::Dead>::default(),
-                appdata: std::sync::Weak::new(),
-            }),
+            inner: Rc::new(RefCell::new(None)),
         }
     }
 }
@@ -334,7 +533,7 @@ pub struct CustomCursor;
 
 /// Builder abstraction for creating new windows
 pub(crate) struct WindowBuilder {
-    appdata: std::sync::Weak<application::Data>,
+    app: application::Application,
     handler: Option<Box<dyn WinHandler>>,
     title: String,
     menu: Option<Menu>,
@@ -351,7 +550,7 @@ pub(crate) struct WindowBuilder {
 impl WindowBuilder {
     pub fn new(app: application::Application) -> WindowBuilder {
         WindowBuilder {
-            appdata: std::sync::Arc::downgrade(&app.data),
+            app,
             handler: None,
             title: String::new(),
             menu: None,
@@ -437,25 +636,42 @@ impl WindowBuilder {
             return self.create_popup(parent);
         }
 
-        let appdata = match self.appdata.upgrade() {
-            Some(d) => d,
-            None => return Err(ShellError::ApplicationDropped),
+        let mut handler = self.handler.expect("must set a window handler");
+
+        let mut appdata = self.app.data.borrow_mut();
+        let window = {
+            let surface = appdata
+                .compositor_state
+                .create_surface(&appdata.queue_handle);
+            appdata.xdg_shell.create_window(
+                surface,
+                WindowDecorations::ServerDefault,
+                &appdata.queue_handle,
+            )
         };
 
-        let handler = self.handler.expect("must set a window handler");
+        window.set_title(self.title.clone());
 
-        let surface =
-            surfaces::toplevel::Surface::new(appdata.clone(), handler, self.size, self.min_size);
+        window.commit();
 
-        (&surface as &dyn surfaces::Decor).set_title(self.title);
-
-        let handle = WindowHandle::new(
-            surface.clone(),
-            surface.clone(),
-            surface.clone(),
-            surface.clone(),
-            self.appdata.clone(),
-        );
+        let handle = WindowHandle {
+            inner: Rc::new(RefCell::new(Some(Inner {
+                id: make_wid(window.wl_surface()),
+                window,
+                queue_handle: appdata.queue_handle.clone(),
+                compositor_state: appdata.compositor_state.clone(),
+                frame: None,
+                last_configure: None,
+                title: self.title,
+                transparent: false,
+                size: self.size,
+                csd_fails: false,
+                stateless_size: self.size,
+                viewport: None,
+                appdata: self.app.data.clone(),
+                idle_queue: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
+            }))),
+        };
 
         if appdata
             .handles
@@ -475,11 +691,32 @@ impl WindowBuilder {
             .borrow_mut()
             .push_front(handle.id());
 
-        surface.with_handler({
+        let mut wayland_source = self.app.wayland_dispatcher.as_source_mut();
+        let event_queue = wayland_source.queue();
+
+        // Do a roundtrip.
+        event_queue.roundtrip(&mut appdata).map_err(|_| {
+            ShellError::Platform(crate::backend::linux::error::Error::Wayland(Error::string(
+                "failed to do initial roundtrip for the window.",
+            )))
+        })?;
+
+        // XXX Wait for the initial configure to arrive.
+        while !handle.is_configured() {
+            event_queue.blocking_dispatch(&mut appdata).map_err(|_| {
+                ShellError::Platform(crate::backend::linux::error::Error::Wayland(Error::string(
+                    "failed to dispatch queue while waiting for initial configure.",
+                )))
+            })?;
+        }
+
+        println!("window configured");
+
+        {
             let handle = handle.clone();
             let handle = crate::backend::window::WindowHandle::Wayland(handle);
-            move |winhandle| winhandle.connect(&handle.into())
-        });
+            handler.connect(&handle.into());
+        }
 
         Ok(handle)
     }
@@ -505,7 +742,7 @@ impl WindowBuilder {
                 anyhow::anyhow!("wrong window handle").into(),
             )),
             crate::backend::window::WindowHandle::Wayland(parent) => {
-                popup::create(parent, &config, self.appdata, self.handler)
+                popup::create(parent, &config, self.app.data, self.handler)
             }
         }
     }
@@ -513,6 +750,9 @@ impl WindowBuilder {
 
 #[allow(unused)]
 pub mod layershell {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use crate::error::Error as ShellError;
     use crate::window::WinHandler;
 
@@ -523,7 +763,7 @@ pub mod layershell {
 
     /// Builder abstraction for creating new windows
     pub(crate) struct Builder {
-        appdata: std::sync::Weak<Data>,
+        appdata: Rc<RefCell<Data>>,
         winhandle: Option<Box<dyn WinHandler>>,
         pub(crate) config: surfaces::layershell::Config,
     }
@@ -531,7 +771,7 @@ pub mod layershell {
     impl Builder {
         pub fn new(app: Application) -> Builder {
             Builder {
-                appdata: std::sync::Arc::downgrade(&app.data),
+                appdata: app.data,
                 config: surfaces::layershell::Config::default(),
                 winhandle: None,
             }
@@ -542,10 +782,7 @@ pub mod layershell {
         }
 
         pub fn build(self) -> Result<WindowHandle, ShellError> {
-            let appdata = match self.appdata.upgrade() {
-                Some(d) => d,
-                None => return Err(ShellError::ApplicationDropped),
-            };
+            let appdata = self.appdata.clone();
 
             let winhandle = match self.winhandle {
                 Some(winhandle) => winhandle,
@@ -570,6 +807,7 @@ pub mod layershell {
             );
 
             if appdata
+                .borrow()
                 .handles
                 .borrow_mut()
                 .insert(handle.id(), handle.clone())
@@ -578,6 +816,7 @@ pub mod layershell {
                 panic!("wayland should use unique object IDs");
             }
             appdata
+                .borrow()
                 .active_surface_id
                 .borrow_mut()
                 .push_front(handle.id());
@@ -595,6 +834,9 @@ pub mod layershell {
 
 #[allow(unused)]
 pub mod popup {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use crate::error::Error as ShellError;
     use crate::window::WinHandler;
 
@@ -607,13 +849,10 @@ pub mod popup {
     pub(super) fn create(
         parent: &WindowHandle,
         config: &surfaces::popup::Config,
-        wappdata: std::sync::Weak<Data>,
+        wappdata: Rc<RefCell<Data>>,
         winhandle: Option<Box<dyn WinHandler>>,
     ) -> Result<WindowHandle, ShellError> {
-        let appdata = match wappdata.upgrade() {
-            Some(d) => d,
-            None => return Err(ShellError::ApplicationDropped),
-        };
+        let appdata = wappdata.clone();
 
         let winhandle = match winhandle {
             Some(winhandle) => winhandle,
@@ -647,6 +886,7 @@ pub mod popup {
         );
 
         if appdata
+            .borrow()
             .handles
             .borrow_mut()
             .insert(handle.id(), handle.clone())
@@ -655,6 +895,7 @@ pub mod popup {
             panic!("wayland should use unique object IDs");
         }
         appdata
+            .borrow()
             .active_surface_id
             .borrow_mut()
             .push_front(handle.id());
@@ -667,4 +908,37 @@ pub mod popup {
 
         Ok(handle)
     }
+}
+
+// The window update comming from the compositor.
+#[derive(Debug, Clone, Copy)]
+pub struct WindowCompositorUpdate {
+    /// The id of the window this updates belongs to.
+    pub window_id: u64,
+
+    /// New window size.
+    pub size: Option<Size>,
+
+    /// New scale factor.
+    pub scale_factor: Option<f64>,
+
+    /// Close the window.
+    pub close_window: bool,
+}
+
+impl WindowCompositorUpdate {
+    pub fn new(window_id: u64) -> Self {
+        Self {
+            window_id,
+            size: None,
+            scale_factor: None,
+            close_window: false,
+        }
+    }
+}
+
+/// Get the WindowId out of the surface.
+#[inline]
+pub(crate) fn make_wid(surface: &WlSurface) -> u64 {
+    surface.id().as_ptr() as u64
 }

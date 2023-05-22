@@ -16,15 +16,15 @@ use super::{application, window};
 
 /// A wrapper around the wayland event queue that calloop knows how to select.
 pub(crate) struct WaylandSource {
-    appdata: std::sync::Arc<application::Data>,
+    appdata: Rc<RefCell<application::Data>>,
     queue: Rc<RefCell<EventQueue>>,
     fd: Generic<Fd>,
 }
 
 impl WaylandSource {
     /// Wrap an `EventQueue` as a `WaylandSource`.
-    pub fn new(appdata: std::sync::Arc<application::Data>) -> WaylandSource {
-        let queue = appdata.wayland.queue.clone();
+    pub fn new(appdata: Rc<RefCell<application::Data>>) -> WaylandSource {
+        let queue = appdata.borrow().wayland.queue.clone();
         let fd = queue.borrow().display().get_connection_fd();
         WaylandSource {
             appdata,
@@ -76,9 +76,9 @@ impl EventSource for WaylandSource {
     {
         tracing::trace!("processing events invoked {:?} {:?}", ready, token);
 
-        self.appdata.display_flushed.replace(false);
+        self.appdata.borrow().display_flushed.replace(false);
 
-        let winhandle = match self.appdata.acquire_current_window() {
+        let winhandle = match self.appdata.borrow().acquire_current_window() {
             Some(winhandle) => winhandle,
             None => {
                 tracing::error!("unable to acquire current window");
@@ -130,7 +130,7 @@ impl EventSource for WaylandSource {
             // Should not really happen, if it does we do nothing and will flush again later.
             tracing::warn!("unable to flush display: {:?}", e);
         } else {
-            self.appdata.display_flushed.replace(true);
+            self.appdata.borrow().display_flushed.replace(true);
         }
 
         tracing::trace!("event queue completed");

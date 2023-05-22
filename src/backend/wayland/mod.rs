@@ -21,6 +21,7 @@ pub mod error;
 mod events;
 pub mod keyboard;
 pub mod menu;
+mod output;
 mod outputs;
 pub mod pointers;
 pub mod screen;

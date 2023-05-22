@@ -2,7 +2,7 @@ use crate::common_util::IdleCallback;
 use crate::window;
 
 /// This represents different Idle Callback Mechanism
-pub(super) enum Kind {
+pub(crate) enum Kind {
     Callback(Box<dyn IdleCallback>),
     Token(window::IdleToken),
 }
@@ -21,7 +21,7 @@ impl std::fmt::Debug for Kind {
 
 #[derive(Clone)]
 pub struct Handle {
-    pub(super) queue: std::sync::Arc<std::sync::Mutex<Vec<Kind>>>,
+    pub(crate) queue: std::sync::Arc<std::sync::Mutex<Vec<Kind>>>,
 }
 
 impl Handle {

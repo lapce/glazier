@@ -14,24 +14,32 @@
 
 //! wayland platform errors.
 
+use smithay_client_toolkit::reexports::client::{
+    self,
+    globals::{BindError, GlobalError},
+};
 use std::{error::Error as StdError, fmt, sync::Arc};
-use wayland_client as wl;
 
 #[derive(Debug, Clone)]
 pub enum Error {
     /// Error connecting to wayland server.
-    Connect(Arc<wl::ConnectError>),
+    Connect(Arc<client::ConnectError>),
     /// A wayland global either doesn't exist, or doesn't support the version we need.
     Global {
         name: String,
         version: u32,
-        inner: Arc<wl::GlobalError>,
+        inner: Arc<GlobalError>,
+    },
+    Bind {
+        name: String,
+        inner: Arc<BindError>,
     },
     /// An unexpected error occurred. It's not handled by glazier/wayland, so you should
     /// terminate the app.
     Fatal(Arc<dyn StdError + 'static>),
     String(ErrorString),
     InvalidParent(u32),
+    InvalidId,
     /// general error.
     Err(Arc<dyn StdError + 'static>),
 }
@@ -46,10 +54,17 @@ impl Error {
         Self::Fatal(Arc::new(e))
     }
 
-    pub fn global(name: impl Into<String>, version: u32, inner: wl::GlobalError) -> Self {
+    pub fn global(name: impl Into<String>, version: u32, inner: GlobalError) -> Self {
         Error::Global {
             name: name.into(),
             version,
+            inner: Arc::new(inner),
+        }
+    }
+
+    pub fn bind(name: impl Into<String>, inner: BindError) -> Self {
+        Error::Bind {
+            name: name.into(),
             inner: Arc::new(inner),
         }
     }
@@ -71,6 +86,8 @@ impl fmt::Display for Error {
             Self::Err(e) => write!(f, "an unhandled error occurred: {e:?}"),
             Self::String(e) => e.fmt(f),
             Self::InvalidParent(id) => write!(f, "invalid parent window for popup: {id:?}"),
+            Self::InvalidId => write!(f, "Invalid ObjectId"),
+            Self::Bind { name, inner } => write!(f, "{name} failed to bind: {inner}"),
         }
     }
 }
@@ -84,13 +101,21 @@ impl std::error::Error for Error {
             Self::Err(e) => Some(&**e),
             Self::String(e) => Some(e),
             Self::InvalidParent(_) => None,
+            Self::InvalidId => None,
+            Self::Bind { inner, .. } => Some(inner),
         }
     }
 }
 
-impl From<wl::ConnectError> for Error {
-    fn from(err: wl::ConnectError) -> Self {
+impl From<client::ConnectError> for Error {
+    fn from(err: client::ConnectError) -> Self {
         Self::Connect(Arc::new(err))
+    }
+}
+
+impl From<smithay_client_toolkit::reexports::client::backend::InvalidId> for Error {
+    fn from(_: smithay_client_toolkit::reexports::client::backend::InvalidId) -> Self {
+        Error::InvalidId
     }
 }
 

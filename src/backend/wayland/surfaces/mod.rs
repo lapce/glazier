@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use wayland_client::protocol::wl_shm::WlShm;
 use wayland_client::{self as wlc, protocol::wl_surface::WlSurface};
 use wayland_protocols::wlr::unstable::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
@@ -72,7 +75,7 @@ pub trait Handle {
 
 #[derive(Clone)]
 pub struct CompositorHandle {
-    inner: std::sync::Weak<dyn Compositor>,
+    inner: Rc<RefCell<dyn Compositor>>,
 }
 
 impl CompositorHandle {
@@ -80,20 +83,17 @@ impl CompositorHandle {
         c.into()
     }
 
-    pub fn direct(c: std::sync::Weak<dyn Compositor>) -> Self {
+    pub fn direct(c: Rc<RefCell<dyn Compositor>>) -> Self {
         Self { inner: c }
     }
 
     fn create_surface(&self) -> Option<wlc::Main<WlSurface>> {
-        self.inner.upgrade().map(|c| c.create_surface())
+        Some(self.inner.borrow().create_surface())
     }
 
     /// Recompute the scale to use (the maximum of all the provided outputs).
     fn recompute_scale(&self, outputs: &std::collections::HashSet<u32>) -> i32 {
-        let compositor = match self.inner.upgrade() {
-            Some(c) => c,
-            None => panic!("should never recompute scale of window that has been dropped"),
-        };
+        let compositor = self.inner.borrow();
         tracing::debug!("computing scale using {:?} outputs", outputs.len());
         let scale = outputs.iter().fold(0, |scale, id| {
             tracing::debug!("recomputing scale using output {:?}", id);
@@ -121,49 +121,26 @@ impl CompositorHandle {
 
 impl Compositor for CompositorHandle {
     fn output(&self, id: u32) -> Option<outputs::Meta> {
-        match self.inner.upgrade() {
-            None => None,
-            Some(c) => c.output(id),
-        }
+        self.inner.borrow().output(id)
     }
 
     fn create_surface(&self) -> wlc::Main<WlSurface> {
-        match self.inner.upgrade() {
-            None => panic!("unable to acquire underlying compositor to create a surface"),
-            Some(c) => c.create_surface(),
-        }
+        self.inner.borrow().create_surface()
     }
 
     fn shared_mem(&self) -> wlc::Main<WlShm> {
-        match self.inner.upgrade() {
-            None => panic!("unable to acquire underlying compositor to acquire shared memory"),
-            Some(c) => c.shared_mem(),
-        }
+        self.inner.borrow().shared_mem()
     }
 
     fn get_xdg_surface(&self, s: &wlc::Main<WlSurface>) -> wlc::Main<xdg_surface::XdgSurface> {
-        match self.inner.upgrade() {
-            None => panic!("unable to acquire underlying compositor to create an xdg surface"),
-            Some(c) => c.get_xdg_surface(s),
-        }
+        self.inner.borrow().get_xdg_surface(s)
     }
 
     fn get_xdg_positioner(&self) -> wlc::Main<xdg_positioner::XdgPositioner> {
-        match self.inner.upgrade() {
-            None => panic!("unable to acquire underlying compositor to create an xdg positioner"),
-            Some(c) => c.get_xdg_positioner(),
-        }
+        self.inner.borrow().get_xdg_positioner()
     }
 
     fn zwlr_layershell_v1(&self) -> Option<wlc::Main<ZwlrLayerShellV1>> {
-        match self.inner.upgrade() {
-            None => {
-                tracing::warn!(
-                    "unable to acquire underyling compositor to acquire the layershell manager"
-                );
-                None
-            }
-            Some(c) => c.zwlr_layershell_v1(),
-        }
+        self.inner.borrow().zwlr_layershell_v1()
     }
 }

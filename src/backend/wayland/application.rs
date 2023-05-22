@@ -15,18 +15,45 @@
 #![allow(clippy::single_match)]
 
 use super::{
-    clipboard, display, error::Error, events::WaylandSource, keyboard, outputs, pointers, surfaces,
-    window::WindowHandle,
+    clipboard, display,
+    error::Error,
+    events::WaylandSource,
+    keyboard::{self},
+    outputs, pointers, surfaces,
+    window::{make_wid, WindowCompositorUpdate, WindowHandle},
 };
 
-use crate::{backend, mouse, AppHandler, TimerToken};
+use crate::{
+    backend::{self, wayland::output::MonitorHandle},
+    mouse, AppHandler, TimerToken,
+};
 
 use calloop;
+use smithay_client_toolkit::{
+    compositor::{CompositorHandler, CompositorState},
+    delegate_compositor, delegate_output, delegate_registry, delegate_seat, delegate_shm,
+    delegate_subcompositor, delegate_xdg_shell, delegate_xdg_window,
+    output::{OutputHandler, OutputState},
+    reexports::{
+        calloop::EventLoop,
+        client::{self, globals::registry_queue_init, Connection, QueueHandle},
+    },
+    registry::{ProvidesRegistryState, RegistryState},
+    registry_handlers,
+    seat::{SeatHandler, SeatState},
+    shell::{
+        xdg::{window::WindowHandler, XdgShell},
+        WaylandSurface,
+    },
+    shm::{Shm, ShmHandler},
+    subcompositor::SubcompositorState,
+};
 
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, BinaryHeap},
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -47,6 +74,12 @@ use wayland_cursor::CursorTheme;
 use wayland_protocols::wlr::unstable::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
 use wayland_protocols::xdg_shell::client::xdg_positioner::XdgPositioner;
 use wayland_protocols::xdg_shell::client::xdg_surface;
+
+pub(crate) type WaylandDispatcher = smithay_client_toolkit::reexports::calloop::Dispatcher<
+    'static,
+    client::WaylandSource<Data>,
+    Data,
+>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Timer(backend::shared::Timer<u64>);
@@ -86,11 +119,45 @@ impl std::cmp::PartialOrd for Timer {
 
 #[derive(Clone)]
 pub struct Application {
-    pub(super) data: std::sync::Arc<Data>,
+    pub(super) data: Rc<RefCell<Data>>,
+
+    pub(crate) wayland_dispatcher: WaylandDispatcher,
+
+    pub(crate) event_loop: Rc<RefCell<EventLoop<'static, Data>>>,
 }
 
 #[allow(dead_code)]
-pub(crate) struct Data {
+pub struct Data {
+    /// The WlRegistry.
+    pub(super) registry_state: RegistryState,
+
+    /// The state of the WlOutput handling.
+    pub(super) output_state: OutputState,
+
+    /// The compositor state which is used to create new windows and regions.
+    pub(super) compositor_state: Arc<CompositorState>,
+
+    /// The state of the subcompositor.
+    pub(super) subcompositor_state: Arc<SubcompositorState>,
+
+    /// The seat state responsible for all sorts of input.
+    pub(super) seat_state: SeatState,
+
+    /// The update for the `windows` comming from the compositor.
+    pub window_compositor_updates: Vec<WindowCompositorUpdate>,
+
+    /// Observed monitors.
+    pub monitors: Vec<MonitorHandle>,
+
+    /// The shm for software buffers, such as cursors.
+    pub(super) shm: Shm,
+
+    /// The XDG shell that is used for widnows.
+    pub(super) xdg_shell: XdgShell,
+
+    /// The main queue used by the event loop.
+    pub(super) queue_handle: QueueHandle<Data>,
+
     pub(super) wayland: std::rc::Rc<display::Environment>,
     pub(super) zwlr_layershell_v1: Option<wl::Main<ZwlrLayerShellV1>>,
     pub(super) wl_compositor: wl::Main<WlCompositor>,
@@ -141,6 +208,39 @@ pub(crate) struct Data {
 impl Application {
     pub fn new() -> Result<Self, Error> {
         tracing::info!("wayland application initiated");
+
+        let conn = Connection::connect_to_env()?;
+        let (globals, mut event_queue) =
+            registry_queue_init(&conn).map_err(|e| Error::global("wl_registry", 0, e))?;
+        let qh: client::QueueHandle<Data> = event_queue.handle();
+        let registry_state = RegistryState::new(&globals);
+        let compositor_state =
+            CompositorState::bind(&globals, &qh).map_err(|e| Error::bind("wl_compositor", e))?;
+        let subcompositor_state =
+            SubcompositorState::bind(compositor_state.wl_compositor().clone(), &globals, &qh)
+                .map_err(|e| Error::bind("wl_compositor", e))?;
+
+        let xdg_shell = XdgShell::bind(&globals, &qh).map_err(|e| Error::bind("xdg_shell", e))?;
+        let seat_state = SeatState::new(&globals, &qh);
+
+        let output_state = OutputState::new(&globals, &qh);
+        let monitors: Vec<_> = output_state.outputs().map(MonitorHandle::new).collect();
+
+        let shm = Shm::bind(&globals, &qh).map_err(|e| Error::bind("shm", e))?;
+
+        let wayland_source =
+            client::WaylandSource::new(event_queue).map_err(|e| Error::string(e.to_string()))?;
+        let wayland_dispatcher = smithay_client_toolkit::reexports::calloop::Dispatcher::new(
+            wayland_source,
+            |_, queue, data| queue.dispatch_pending(data),
+        );
+
+        let event_loop = smithay_client_toolkit::reexports::calloop::EventLoop::<Data>::try_new()
+            .map_err(|e| Error::string(e.to_string()))?;
+        event_loop
+            .handle()
+            .register_dispatcher(wayland_dispatcher.clone())
+            .map_err(|e| Error::string(e.to_string()))?;
 
         // Global objects that can come and go (so we must handle them dynamically).
         //
@@ -221,11 +321,8 @@ impl Application {
         let wl_compositor = env
             .registry
             .instantiate_range::<WlCompositor>(1, 5)
-            .map_err(|e| Error::global("wl_compositor", 1, e))?;
-        let wl_shm = env
-            .registry
-            .instantiate_exact::<WlShm>(1)
-            .map_err(|e| Error::global("wl_shm", 1, e))?;
+            .unwrap();
+        let wl_shm = env.registry.instantiate_exact::<WlShm>(1).unwrap();
 
         let timer_source = calloop::timer::Timer::new().unwrap();
         let timer_handle = timer_source.handle();
@@ -238,7 +335,17 @@ impl Application {
         );
 
         // We need to have keyboard events set up for our seats before the next roundtrip.
-        let appdata = std::sync::Arc::new(Data {
+        let appdata = Rc::new(RefCell::new(Data {
+            registry_state,
+            output_state,
+            compositor_state: Arc::new(compositor_state),
+            subcompositor_state: Arc::new(subcompositor_state),
+            seat_state,
+            window_compositor_updates: Vec::new(),
+            monitors,
+            xdg_shell,
+            shm,
+            queue_handle: qh,
             zwlr_layershell_v1,
             wl_compositor,
             wl_shm: wl_shm.clone(),
@@ -258,38 +365,39 @@ impl Application {
             roundtrip_requested: RefCell::new(false),
             outputsqueue: RefCell::new(Some(outputqueue)),
             wayland: std::rc::Rc::new(env),
-        });
-
-        // Collect the supported image formats.
-        wl_shm.quick_assign(with_cloned!(appdata; move |d1, event, d3| {
-            tracing::debug!("shared memory events {:?} {:?} {:?}", d1, event, d3);
-            match event {
-                wl_shm::Event::Format { format } => appdata.formats.borrow_mut().push(format),
-                _ => (), // ignore other messages
-            }
         }));
 
-        // Setup seat event listeners with our application
-        for (id, seat) in appdata.seats.borrow().iter() {
-            let id = *id; // move into closure.
-            let wl_seat = seat.borrow().wl_seat.clone();
-            wl_seat.quick_assign(with_cloned!(seat, appdata; move |d1, event, d3| {
+        {
+            // Collect the supported image formats.
+            wl_shm.quick_assign(with_cloned!(appdata; move |d1, event, d3| {
+                tracing::debug!("shared memory events {:?} {:?} {:?}", d1, event, d3);
+                match event {
+                    wl_shm::Event::Format { format } => appdata.borrow().formats.borrow_mut().push(format),
+                    _ => (), // ignore other messages
+                }
+            }));
+
+            // Setup seat event listeners with our application
+            for (id, seat) in appdata.borrow().seats.borrow().iter() {
+                let id = *id; // move into closure.
+                let wl_seat = seat.borrow().wl_seat.clone();
+                wl_seat.quick_assign(with_cloned!(seat, appdata; move |d1, event, d3| {
                 tracing::debug!("seat events {:?} {:?} {:?}", d1, event, d3);
                 let mut seat = seat.borrow_mut();
-                appdata.clipboard.attach(&mut seat);
+                appdata.borrow().clipboard.attach(&mut seat);
                 match event {
                     wl_seat::Event::Capabilities { capabilities } => {
                         seat.capabilities = capabilities;
                         if capabilities.contains(wl_seat::Capability::Keyboard)
                             && seat.keyboard.is_none()
                         {
-                            seat.keyboard = Some(appdata.keyboard.attach(id, seat.wl_seat.clone()));
+                            seat.keyboard = Some(appdata.borrow().keyboard.attach(id, seat.wl_seat.clone()));
                         }
                         if capabilities.contains(wl_seat::Capability::Pointer)
                             && seat.pointer.is_none()
                         {
                             let pointer = seat.wl_seat.get_pointer();
-                            appdata.pointer.attach(pointer.detach());
+                            appdata.borrow().pointer.attach(pointer.detach());
                             pointer.quick_assign({
                                 let app = appdata.clone();
                                 move |pointer, event, _| {
@@ -313,21 +421,26 @@ impl Application {
                     _ => tracing::info!("seat quick assign unknown event {:?}", event), // ignore future events
                 }
             }));
+            }
+
+            // Let wayland finish setup before we allow the client to start creating windows etc.
+            appdata.borrow().sync()?;
         }
 
-        // Let wayland finish setup before we allow the client to start creating windows etc.
-        appdata.sync()?;
-
-        Ok(Application { data: appdata })
+        Ok(Application {
+            data: appdata,
+            event_loop: Rc::new(RefCell::new(event_loop)),
+            wayland_dispatcher,
+        })
     }
 
     pub fn run(mut self, _handler: Option<Box<dyn AppHandler>>) {
         tracing::info!("wayland event loop initiated");
         // NOTE if we want to call this function more than once, we will need to put the timer
         // source back.
-        let timer_source = self.data.timer_source.borrow_mut().take().unwrap();
+        let timer_source = self.data.borrow().timer_source.borrow_mut().take().unwrap();
         // flush pending events (otherwise anything we submitted since sync will never be sent)
-        self.data.wayland.display.flush().unwrap();
+        self.data.borrow().wayland.display.flush().unwrap();
 
         // Use calloop so we can epoll both wayland events and others (e.g. timers)
         let mut eventloop = calloop::EventLoop::try_new().unwrap();
@@ -335,35 +448,9 @@ impl Application {
 
         let wayland_dispatcher = WaylandSource::new(self.data.clone()).into_dispatcher();
 
-        self.data.keyboard.events(&handle);
+        self.data.borrow().keyboard.events(&handle);
 
         handle.register_dispatcher(wayland_dispatcher).unwrap();
-        handle
-            .insert_source(self.data.outputsqueue.take().unwrap(), {
-                move |evt, _ignored, appdata| match evt {
-                    calloop::channel::Event::Closed => {}
-                    calloop::channel::Event::Msg(output) => match output {
-                        outputs::Event::Located(output) => {
-                            tracing::debug!("output added {:?} {:?}", output.gid, output.id());
-                            appdata
-                                .outputs
-                                .borrow_mut()
-                                .insert(output.id(), output.clone());
-                            for (_, win) in appdata.handles_iter() {
-                                surfaces::Outputs::inserted(&win, &output);
-                            }
-                        }
-                        outputs::Event::Removed(output) => {
-                            tracing::debug!("output removed {:?} {:?}", output.gid, output.id());
-                            appdata.outputs.borrow_mut().remove(&output.id());
-                            for (_, win) in appdata.handles_iter() {
-                                surfaces::Outputs::removed(&win, &output);
-                            }
-                        }
-                    },
-                }
-            })
-            .unwrap();
 
         handle
             .insert_source(timer_source, move |token, _metadata, appdata| {
@@ -375,34 +462,25 @@ impl Application {
         let signal = eventloop.get_signal();
         let handle = handle.clone();
 
-        let res = eventloop.run(Duration::from_millis(20), &mut self.data, move |appdata| {
-            if appdata.shutdown.get() {
-                tracing::debug!("shutting down, requested");
-                signal.stop();
-                return;
+        let mut event_loop = self.event_loop.borrow_mut();
+        let mut data = self.data.borrow_mut();
+        loop {
+            event_loop
+                .dispatch(Duration::from_millis(16), &mut data)
+                .unwrap();
+
+            if data.shutdown.get() {
+                break;
             }
-
-            if appdata.handles.borrow().len() == 0 {
-                tracing::debug!("shutting down, no window remaining");
-                signal.stop();
-                return;
-            }
-
-            Data::idle_repaint(handle.clone());
-        });
-
-        match res {
-            Ok(_) => tracing::info!("wayland event loop completed"),
-            Err(cause) => tracing::error!("wayland event loop failed {:?}", cause),
         }
     }
 
     pub fn quit(&self) {
-        self.data.shutdown.set(true);
+        self.data.borrow().shutdown.set(true);
     }
 
     pub fn clipboard(&self) -> clipboard::Clipboard {
-        clipboard::Clipboard::from(&self.data.clipboard)
+        clipboard::Clipboard::from(&self.data.borrow().clipboard)
     }
 
     pub fn get_locale() -> String {
@@ -544,11 +622,9 @@ impl From<Application> for surfaces::CompositorHandle {
     }
 }
 
-impl From<std::sync::Arc<Data>> for surfaces::CompositorHandle {
-    fn from(data: std::sync::Arc<Data>) -> surfaces::CompositorHandle {
-        surfaces::CompositorHandle::direct(
-            std::sync::Arc::downgrade(&data) as std::sync::Weak<dyn surfaces::Compositor>
-        )
+impl From<Rc<RefCell<Data>>> for surfaces::CompositorHandle {
+    fn from(data: Rc<RefCell<Data>>) -> surfaces::CompositorHandle {
+        surfaces::CompositorHandle::direct(data as Rc<RefCell<dyn surfaces::Compositor>>)
     }
 }
 
@@ -572,3 +648,181 @@ impl Seat {
         }
     }
 }
+
+impl CompositorHandler for Data {
+    fn scale_factor_changed(
+        &mut self,
+        conn: &client::Connection,
+        qh: &client::QueueHandle<Self>,
+        surface: &client::protocol::wl_surface::WlSurface,
+        new_factor: i32,
+    ) {
+        todo!()
+    }
+
+    fn frame(
+        &mut self,
+        conn: &client::Connection,
+        qh: &client::QueueHandle<Self>,
+        surface: &client::protocol::wl_surface::WlSurface,
+        time: u32,
+    ) {
+        todo!()
+    }
+}
+
+impl OutputHandler for Data {
+    fn output_state(&mut self) -> &mut OutputState {
+        &mut self.output_state
+    }
+
+    fn new_output(
+        &mut self,
+        _conn: &client::Connection,
+        _qh: &client::QueueHandle<Self>,
+        output: client::protocol::wl_output::WlOutput,
+    ) {
+        self.monitors.push(MonitorHandle::new(output));
+    }
+
+    fn update_output(
+        &mut self,
+        _conn: &client::Connection,
+        _qh: &client::QueueHandle<Self>,
+        updated: client::protocol::wl_output::WlOutput,
+    ) {
+        let updated = MonitorHandle::new(updated);
+        if let Some(pos) = self.monitors.iter().position(|output| output == &updated) {
+            self.monitors[pos] = updated
+        } else {
+            self.monitors.push(updated)
+        }
+    }
+
+    fn output_destroyed(
+        &mut self,
+        _conn: &client::Connection,
+        _qh: &client::QueueHandle<Self>,
+        removed: client::protocol::wl_output::WlOutput,
+    ) {
+        let removed = MonitorHandle::new(removed);
+        if let Some(pos) = self.monitors.iter().position(|output| output == &removed) {
+            self.monitors.remove(pos);
+        }
+    }
+}
+
+impl WindowHandler for Data {
+    fn request_close(
+        &mut self,
+        conn: &client::Connection,
+        qh: &client::QueueHandle<Self>,
+        window: &smithay_client_toolkit::shell::xdg::window::Window,
+    ) {
+        todo!()
+    }
+
+    fn configure(
+        &mut self,
+        conn: &client::Connection,
+        qh: &client::QueueHandle<Self>,
+        window: &smithay_client_toolkit::shell::xdg::window::Window,
+        configure: smithay_client_toolkit::shell::xdg::window::WindowConfigure,
+        serial: u32,
+    ) {
+        let window_id = make_wid(window.wl_surface());
+
+        let pos = if let Some(pos) = self
+            .window_compositor_updates
+            .iter()
+            .position(|update| update.window_id == window_id)
+        {
+            pos
+        } else {
+            self.window_compositor_updates
+                .push(WindowCompositorUpdate::new(window_id));
+            self.window_compositor_updates.len() - 1
+        };
+
+        // Populate the configure to the window.
+        //
+        // XXX the size on the window will be updated right before dispatching the size to the user.
+
+        println!("window configure {configure:?}");
+
+        let new_size = self
+            .handles
+            .borrow()
+            .get(&window_id)
+            .expect("got configure for dead window.")
+            .configure(configure, &self.shm, &self.subcompositor_state);
+
+        self.window_compositor_updates[pos].size = Some(new_size);
+    }
+}
+
+impl SeatHandler for Data {
+    fn seat_state(&mut self) -> &mut SeatState {
+        todo!()
+    }
+
+    fn new_seat(
+        &mut self,
+        conn: &client::Connection,
+        qh: &client::QueueHandle<Self>,
+        seat: client::protocol::wl_seat::WlSeat,
+    ) {
+        todo!()
+    }
+
+    fn new_capability(
+        &mut self,
+        conn: &client::Connection,
+        qh: &client::QueueHandle<Self>,
+        seat: client::protocol::wl_seat::WlSeat,
+        capability: smithay_client_toolkit::seat::Capability,
+    ) {
+    }
+
+    fn remove_capability(
+        &mut self,
+        conn: &client::Connection,
+        qh: &client::QueueHandle<Self>,
+        seat: client::protocol::wl_seat::WlSeat,
+        capability: smithay_client_toolkit::seat::Capability,
+    ) {
+        todo!()
+    }
+
+    fn remove_seat(
+        &mut self,
+        conn: &client::Connection,
+        qh: &client::QueueHandle<Self>,
+        seat: client::protocol::wl_seat::WlSeat,
+    ) {
+        todo!()
+    }
+}
+
+impl ProvidesRegistryState for Data {
+    fn registry(&mut self) -> &mut RegistryState {
+        &mut self.registry_state
+    }
+
+    registry_handlers![OutputState, SeatState,];
+}
+
+impl ShmHandler for Data {
+    fn shm_state(&mut self) -> &mut Shm {
+        &mut self.shm
+    }
+}
+
+delegate_subcompositor!(Data);
+delegate_compositor!(Data);
+delegate_output!(Data);
+delegate_seat!(Data);
+delegate_xdg_shell!(Data);
+delegate_xdg_window!(Data);
+delegate_registry!(Data);
+delegate_shm!(Data);

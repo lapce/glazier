@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 use wayland_client::protocol::wl_pointer;
 use wayland_client::protocol::wl_surface::{self, WlSurface};
 use wayland_client::{self as wl};
@@ -233,7 +235,7 @@ impl Pointer {
     }
 
     pub(super) fn consume(
-        appdata: std::sync::Arc<Data>,
+        appdata: Rc<RefCell<Data>>,
         source: wl_pointer::WlPointer,
         event: wl_pointer::Event,
     ) {
@@ -244,43 +246,53 @@ impl Pointer {
                 surface_y,
                 ..
             } => {
-                appdata.pointer.push(PointerEvent::Motion {
+                appdata.borrow().pointer.push(PointerEvent::Motion {
                     point: Point::new(surface_x, surface_y),
                     pointer: source,
                 });
             }
             wl_pointer::Event::Leave { surface, .. } => {
-                appdata.pointer.push(PointerEvent::Leave);
+                appdata.borrow().pointer.push(PointerEvent::Leave);
             }
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
                 ..
             } => {
-                appdata.pointer.push(PointerEvent::Motion {
+                appdata.borrow().pointer.push(PointerEvent::Motion {
                     point: Point::new(surface_x, surface_y),
                     pointer: source,
                 });
             }
             wl_pointer::Event::Button { button, state, .. } => {
-                appdata.pointer.push(PointerEvent::Button { button, state });
+                appdata
+                    .borrow()
+                    .pointer
+                    .push(PointerEvent::Button { button, state });
             }
             wl_pointer::Event::Axis { axis, value, .. } => {
-                appdata.pointer.push(PointerEvent::Axis { axis, value });
+                appdata
+                    .borrow()
+                    .pointer
+                    .push(PointerEvent::Axis { axis, value });
             }
             wl_pointer::Event::Frame => {
-                let winhandle = match appdata.acquire_current_window().and_then(|w| w.data()) {
+                let winhandle = match appdata
+                    .borrow()
+                    .acquire_current_window()
+                    .and_then(|w| w.data())
+                {
                     Some(w) => w,
                     None => {
                         tracing::warn!("dropping mouse events, no window available");
-                        appdata.pointer.queued_events.borrow_mut().clear();
+                        appdata.borrow().pointer.queued_events.borrow_mut().clear();
                         return;
                     }
                 };
                 let mut winhandle = winhandle.handler.borrow_mut();
 
                 // (re-entrancy) call user code
-                while let Some(event) = appdata.pointer.dequeue() {
+                while let Some(event) = appdata.borrow().pointer.dequeue() {
                     match event {
                         MouseEvtKind::Move(evt) => winhandle.mouse_move(&evt),
                         MouseEvtKind::Up(evt) => winhandle.mouse_up(&evt),

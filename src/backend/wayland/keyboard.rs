@@ -1,3 +1,10 @@
+use smithay_client_toolkit::reexports::client::delegate_dispatch;
+use smithay_client_toolkit::reexports::client::protocol::wl_keyboard::WlKeyboard;
+use smithay_client_toolkit::reexports::client::protocol::wl_seat::WlSeat;
+use smithay_client_toolkit::seat::keyboard::KeyboardData;
+use smithay_client_toolkit::seat::keyboard::KeyboardDataExt;
+use smithay_client_toolkit::seat::keyboard::KeyboardHandler;
+use smithay_client_toolkit::seat::SeatState;
 use std::convert::TryInto;
 use wayland_client as wlc;
 use wayland_client::protocol::wl_keyboard;
@@ -11,6 +18,95 @@ use crate::Modifiers;
 use super::application::Data;
 use super::surfaces::buffers;
 use crate::backend::shared::xkb;
+
+/// The extension to KeyboardData used to store the `window_id`.
+pub struct GlazierKeyboardData {
+    /// The currently focused window surface. Could be `None` on bugged compositors, like mutter.
+    window_id: Option<u64>,
+
+    /// The original keyboard date.
+    keyboard_data: KeyboardData<Data>,
+}
+
+impl GlazierKeyboardData {
+    pub fn new(seat: WlSeat) -> Self {
+        Self {
+            window_id: Default::default(),
+            keyboard_data: KeyboardData::new(seat),
+        }
+    }
+}
+
+impl KeyboardDataExt for GlazierKeyboardData {
+    type State = Data;
+
+    fn keyboard_data(&self) -> &KeyboardData<Self::State> {
+        &self.keyboard_data
+    }
+
+    fn keyboard_data_mut(&mut self) -> &mut KeyboardData<Self::State> {
+        &mut self.keyboard_data
+    }
+}
+
+impl KeyboardHandler for Data {
+    fn enter(
+        &mut self,
+        conn: &smithay_client_toolkit::reexports::client::Connection,
+        qh: &smithay_client_toolkit::reexports::client::QueueHandle<Self>,
+        keyboard: &smithay_client_toolkit::reexports::client::protocol::wl_keyboard::WlKeyboard,
+        surface: &smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface,
+        serial: u32,
+        raw: &[u32],
+        keysyms: &[u32],
+    ) {
+        todo!()
+    }
+
+    fn leave(
+        &mut self,
+        conn: &smithay_client_toolkit::reexports::client::Connection,
+        qh: &smithay_client_toolkit::reexports::client::QueueHandle<Self>,
+        keyboard: &smithay_client_toolkit::reexports::client::protocol::wl_keyboard::WlKeyboard,
+        surface: &smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface,
+        serial: u32,
+    ) {
+        todo!()
+    }
+
+    fn press_key(
+        &mut self,
+        conn: &smithay_client_toolkit::reexports::client::Connection,
+        qh: &smithay_client_toolkit::reexports::client::QueueHandle<Self>,
+        keyboard: &smithay_client_toolkit::reexports::client::protocol::wl_keyboard::WlKeyboard,
+        serial: u32,
+        event: smithay_client_toolkit::seat::keyboard::KeyEvent,
+    ) {
+        todo!()
+    }
+
+    fn release_key(
+        &mut self,
+        conn: &smithay_client_toolkit::reexports::client::Connection,
+        qh: &smithay_client_toolkit::reexports::client::QueueHandle<Self>,
+        keyboard: &smithay_client_toolkit::reexports::client::protocol::wl_keyboard::WlKeyboard,
+        serial: u32,
+        event: smithay_client_toolkit::seat::keyboard::KeyEvent,
+    ) {
+        todo!()
+    }
+
+    fn update_modifiers(
+        &mut self,
+        conn: &smithay_client_toolkit::reexports::client::Connection,
+        qh: &smithay_client_toolkit::reexports::client::QueueHandle<Self>,
+        keyboard: &smithay_client_toolkit::reexports::client::protocol::wl_keyboard::WlKeyboard,
+        serial: u32,
+        modifiers: smithay_client_toolkit::seat::keyboard::Modifiers,
+    ) {
+        todo!()
+    }
+}
 
 #[allow(unused)]
 #[derive(Clone)]
@@ -402,3 +498,5 @@ impl Manager {
             .unwrap();
     }
 }
+
+delegate_dispatch!(Data: [ WlKeyboard: GlazierKeyboardData] => SeatState);

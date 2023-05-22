@@ -102,7 +102,7 @@ impl Manager {
     ) -> Result<Self, waylanderr::Error> {
         let m = gm
             .instantiate_exact::<wl_data_device_manager::WlDataDeviceManager>(3)
-            .map_err(|e| waylanderr::Error::global("wl_data_device_manager", 1, e))?;
+            .unwrap();
 
         m.quick_assign(|i, event, _ignored| {
             tracing::info!("clipboard {:?} event {:?}", i, event);

@@ -23,8 +23,11 @@ pub mod keyboard;
 pub mod menu;
 mod output;
 mod outputs;
+mod pointer;
 pub mod pointers;
+mod relative_pointer;
 pub mod screen;
+mod seat;
 pub mod surfaces;
 pub mod window;
 

@@ -14,8 +14,15 @@ rustdoc-args = ["--cfg", "docsrs"]
 default-target = "x86_64-pc-windows-msvc"
 
 [features]
-default = ["x11", "wayland"]
-gtk = ["cairo-rs", "gdk-sys", "glib-sys", "gtk-sys", "gtk-rs"]
+default = ["gtk"]
+gtk = [
+    "cairo-rs",
+    "gdk-sys",
+    "glib-sys",
+    "gtk-sys",
+    "gtk-rs",
+    "gtk4",
+]
 x11 = [
     "ashpd",
     "bindgen",
@@ -120,9 +127,10 @@ gdk-sys = { version = "0.15.1", optional = true }
 gtk-rs = { version = "0.15.5", features = ["v3_22"], package = "gtk", optional = true }
 glib-sys = { version = "0.15.10", optional = true }
 gtk-sys = { version = "0.15.3", optional = true }
+gtk4 = { version = "0.6.6", optional = true }
 nix = { version = "0.25.0", optional = true }
 x11rb = { version = "0.11.1", features = ["allow-unsafe-code", "present", "render", "randr", "xfixes", "xkb", "resource_manager", "cursor", "xinput"], optional = true }
-wayland-client = { version = "0.29.5", optional = true }
+wayland-client = { version = "0.30.0", optional = true }
 wayland-protocols = { version = "0.29.5", optional = true }
 wayland-cursor = { version = "0.29.5", optional = true }
 smithay-client-toolkit = { version = "0.17.0", optional = true }

@@ -16,6 +16,7 @@
 
 use gtk::gdk::Atom;
 use gtk::{TargetEntry, TargetFlags};
+use gtk4::gdk::Clipboard as GtkClipboard;
 
 use crate::clipboard::{ClipboardFormat, FormatId};
 
@@ -29,9 +30,7 @@ const CLIPBOARD_TARGETS: [&str; 5] = [
 
 /// The system clipboard.
 #[derive(Clone)]
-pub struct Clipboard {
-    pub(crate) selection: Atom,
-}
+pub struct Clipboard(pub(crate) GtkClipboard);
 
 impl std::fmt::Debug for Clipboard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -47,21 +46,7 @@ impl std::fmt::Debug for Clipboard {
 impl Clipboard {
     /// Put a string onto the system clipboard.
     pub fn put_string(&mut self, string: impl AsRef<str>) {
-        let string = string.as_ref().to_string();
-
-        let display = gtk::gdk::Display::default().unwrap();
-        let clipboard = gtk::Clipboard::for_display(&display, &self.selection);
-
-        let targets: Vec<TargetEntry> = CLIPBOARD_TARGETS
-            .iter()
-            .enumerate()
-            .map(|(i, target)| TargetEntry::new(target, TargetFlags::all(), i as u32))
-            .collect();
-
-        clipboard.set_with_data(&targets, move |_, selection, _| {
-            const STRIDE_BITS: i32 = 8;
-            selection.set(&selection.target(), STRIDE_BITS, string.as_bytes());
-        });
+        self.0.set_text(string.as_ref());
     }
 
     /// Put multi-format data on the system clipboard.

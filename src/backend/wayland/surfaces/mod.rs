@@ -24,15 +24,15 @@ pub mod toplevel;
 
 pub static GLOBAL_ID: crate::Counter = crate::Counter::new();
 
-pub trait Compositor {
-    fn output(&self, id: u32) -> Option<outputs::Meta>;
-    fn create_surface(&self) -> wlc::Main<WlSurface>;
-    fn shared_mem(&self) -> wlc::Main<WlShm>;
-    fn get_xdg_surface(&self, surface: &wlc::Main<WlSurface>)
-        -> wlc::Main<xdg_surface::XdgSurface>;
-    fn get_xdg_positioner(&self) -> wlc::Main<xdg_positioner::XdgPositioner>;
-    fn zwlr_layershell_v1(&self) -> Option<wlc::Main<ZwlrLayerShellV1>>;
-}
+// pub trait Compositor {
+//     fn output(&self, id: u32) -> Option<outputs::Meta>;
+//     fn create_surface(&self) -> wlc::Main<WlSurface>;
+//     fn shared_mem(&self) -> wlc::Main<WlShm>;
+//     fn get_xdg_surface(&self, surface: &wlc::Main<WlSurface>)
+//         -> wlc::Main<xdg_surface::XdgSurface>;
+//     fn get_xdg_positioner(&self) -> wlc::Main<xdg_positioner::XdgPositioner>;
+//     fn zwlr_layershell_v1(&self) -> Option<wlc::Main<ZwlrLayerShellV1>>;
+// }
 
 pub trait Decor {
     fn inner_set_title(&self, title: String);
@@ -44,13 +44,13 @@ impl dyn Decor {
     }
 }
 
-pub trait Popup {
-    fn surface<'a>(
-        &self,
-        popup: &'a wlc::Main<xdg_surface::XdgSurface>,
-        pos: &'a wlc::Main<xdg_positioner::XdgPositioner>,
-    ) -> Result<wlc::Main<xdg_popup::XdgPopup>, error::Error>;
-}
+// pub trait Popup {
+//     fn surface<'a>(
+//         &self,
+//         popup: &'a wlc::Main<xdg_surface::XdgSurface>,
+//         pos: &'a wlc::Main<xdg_positioner::XdgPositioner>,
+//     ) -> Result<wlc::Main<xdg_popup::XdgPopup>, error::Error>;
+// }
 
 pub(super) trait Outputs {
     fn removed(&self, o: &outputs::Meta);
@@ -58,89 +58,89 @@ pub(super) trait Outputs {
 }
 
 // handle on given surface.
-pub trait Handle {
-    fn get_size(&self) -> kurbo::Size;
-    fn set_size(&self, dim: kurbo::Size);
-    fn request_anim_frame(&self);
-    fn invalidate(&self);
-    fn invalidate_rect(&self, rect: kurbo::Rect);
-    fn remove_text_field(&self, token: TextFieldToken);
-    fn set_focused_text_field(&self, active_field: Option<TextFieldToken>);
-    fn get_idle_handle(&self) -> idle::Handle;
-    fn get_scale(&self) -> Scale;
-    fn run_idle(&self);
-    fn release(&self);
-    fn data(&self) -> Option<std::sync::Arc<surface::Data>>;
-}
+// pub trait Handle {
+//     fn get_size(&self) -> kurbo::Size;
+//     fn set_size(&self, dim: kurbo::Size);
+//     fn request_anim_frame(&self);
+//     fn invalidate(&self);
+//     fn invalidate_rect(&self, rect: kurbo::Rect);
+//     fn remove_text_field(&self, token: TextFieldToken);
+//     fn set_focused_text_field(&self, active_field: Option<TextFieldToken>);
+//     fn get_idle_handle(&self) -> idle::Handle;
+//     fn get_scale(&self) -> Scale;
+//     fn run_idle(&self);
+//     fn release(&self);
+//     fn data(&self) -> Option<std::sync::Arc<surface::Data>>;
+// }
 
-#[derive(Clone)]
-pub struct CompositorHandle {
-    inner: Rc<RefCell<dyn Compositor>>,
-}
+// #[derive(Clone)]
+// pub struct CompositorHandle {
+//     inner: Rc<RefCell<dyn Compositor>>,
+// }
 
-impl CompositorHandle {
-    pub fn new(c: impl Into<CompositorHandle>) -> Self {
-        c.into()
-    }
+// impl CompositorHandle {
+//     pub fn new(c: impl Into<CompositorHandle>) -> Self {
+//         c.into()
+//     }
 
-    pub fn direct(c: Rc<RefCell<dyn Compositor>>) -> Self {
-        Self { inner: c }
-    }
+//     pub fn direct(c: Rc<RefCell<dyn Compositor>>) -> Self {
+//         Self { inner: c }
+//     }
 
-    fn create_surface(&self) -> Option<wlc::Main<WlSurface>> {
-        Some(self.inner.borrow().create_surface())
-    }
+//     fn create_surface(&self) -> Option<wlc::Main<WlSurface>> {
+//         Some(self.inner.borrow().create_surface())
+//     }
 
-    /// Recompute the scale to use (the maximum of all the provided outputs).
-    fn recompute_scale(&self, outputs: &std::collections::HashSet<u32>) -> i32 {
-        let compositor = self.inner.borrow();
-        tracing::debug!("computing scale using {:?} outputs", outputs.len());
-        let scale = outputs.iter().fold(0, |scale, id| {
-            tracing::debug!("recomputing scale using output {:?}", id);
-            match compositor.output(*id) {
-                None => {
-                    tracing::warn!(
-                        "we still have a reference to an output that's gone away. The output had id {}",
-                        id,
-                    );
-                    scale
-                },
-                Some(output) => scale.max(output.scale as i32),
-            }
-        });
+//     /// Recompute the scale to use (the maximum of all the provided outputs).
+//     fn recompute_scale(&self, outputs: &std::collections::HashSet<u32>) -> i32 {
+//         let compositor = self.inner.borrow();
+//         tracing::debug!("computing scale using {:?} outputs", outputs.len());
+//         let scale = outputs.iter().fold(0, |scale, id| {
+//             tracing::debug!("recomputing scale using output {:?}", id);
+//             match compositor.output(*id) {
+//                 None => {
+//                     tracing::warn!(
+//                         "we still have a reference to an output that's gone away. The output had id {}",
+//                         id,
+//                     );
+//                     scale
+//                 },
+//                 Some(output) => scale.max(output.scale as i32),
+//             }
+//         });
 
-        match scale {
-            0 => {
-                tracing::warn!("wayland never reported which output we are drawing to");
-                1
-            }
-            scale => scale,
-        }
-    }
-}
+//         match scale {
+//             0 => {
+//                 tracing::warn!("wayland never reported which output we are drawing to");
+//                 1
+//             }
+//             scale => scale,
+//         }
+//     }
+// }
 
-impl Compositor for CompositorHandle {
-    fn output(&self, id: u32) -> Option<outputs::Meta> {
-        self.inner.borrow().output(id)
-    }
+// impl Compositor for CompositorHandle {
+//     fn output(&self, id: u32) -> Option<outputs::Meta> {
+//         self.inner.borrow().output(id)
+//     }
 
-    fn create_surface(&self) -> wlc::Main<WlSurface> {
-        self.inner.borrow().create_surface()
-    }
+//     fn create_surface(&self) -> wlc::Main<WlSurface> {
+//         self.inner.borrow().create_surface()
+//     }
 
-    fn shared_mem(&self) -> wlc::Main<WlShm> {
-        self.inner.borrow().shared_mem()
-    }
+//     fn shared_mem(&self) -> wlc::Main<WlShm> {
+//         self.inner.borrow().shared_mem()
+//     }
 
-    fn get_xdg_surface(&self, s: &wlc::Main<WlSurface>) -> wlc::Main<xdg_surface::XdgSurface> {
-        self.inner.borrow().get_xdg_surface(s)
-    }
+//     fn get_xdg_surface(&self, s: &wlc::Main<WlSurface>) -> wlc::Main<xdg_surface::XdgSurface> {
+//         self.inner.borrow().get_xdg_surface(s)
+//     }
 
-    fn get_xdg_positioner(&self) -> wlc::Main<xdg_positioner::XdgPositioner> {
-        self.inner.borrow().get_xdg_positioner()
-    }
+//     fn get_xdg_positioner(&self) -> wlc::Main<xdg_positioner::XdgPositioner> {
+//         self.inner.borrow().get_xdg_positioner()
+//     }
 
-    fn zwlr_layershell_v1(&self) -> Option<wlc::Main<ZwlrLayerShellV1>> {
-        self.inner.borrow().zwlr_layershell_v1()
-    }
-}
+//     fn zwlr_layershell_v1(&self) -> Option<wlc::Main<ZwlrLayerShellV1>> {
+//         self.inner.borrow().zwlr_layershell_v1()
+//     }
+// }

@@ -230,30 +230,30 @@ impl Keyboard {
         tracing::trace!("consume {:?} -> {:?}", seat, event);
         match event {
             wl_keyboard::Event::Keymap { format, fd, size } => {
-                if !matches!(format, wl_keyboard::KeymapFormat::XkbV1) {
-                    panic!("only xkb keymap supported for now");
-                }
+                // if !matches!(format, wl_keyboard::KeymapFormat::XkbV1) {
+                //     panic!("only xkb keymap supported for now");
+                // }
 
-                // TODO to test memory ownership we copy the memory. That way we can deallocate it
-                // and see if we get a segfault.
-                let keymap_data = unsafe {
-                    buffers::Mmap::from_raw_private(
-                        fd,
-                        size.try_into().unwrap(),
-                        0,
-                        size.try_into().unwrap(),
-                    )
-                    .unwrap()
-                    .as_ref()
-                    .to_vec()
-                };
+                // // TODO to test memory ownership we copy the memory. That way we can deallocate it
+                // // and see if we get a segfault.
+                // let keymap_data = unsafe {
+                //     buffers::Mmap::from_raw_private(
+                //         fd,
+                //         size.try_into().unwrap(),
+                //         0,
+                //         size.try_into().unwrap(),
+                //     )
+                //     .unwrap()
+                //     .as_ref()
+                //     .to_vec()
+                // };
 
-                // keymap data is '\0' terminated.
-                let keymap = self.xkb_context.keymap_from_slice(&keymap_data);
-                let keymapstate = keymap.state();
+                // // keymap data is '\0' terminated.
+                // let keymap = self.xkb_context.keymap_from_slice(&keymap_data);
+                // let keymapstate = keymap.state();
 
-                self.xkb_keymap.replace(Some(keymap));
-                self.xkb_state.replace(Some(keymapstate));
+                // self.xkb_keymap.replace(Some(keymap));
+                // self.xkb_state.replace(Some(keymapstate));
             }
             wl_keyboard::Event::Enter { .. } => {
                 self.focused(true);
@@ -267,22 +267,22 @@ impl Keyboard {
                 state,
                 key,
             } => {
-                tracing::trace!(
-                    "key stroke registered {:?} {:?} {:?} {:?}",
-                    time,
-                    serial,
-                    key,
-                    state
-                );
-                self.keystroke(&CachedKeyPress {
-                    repeat: false,
-                    seat,
-                    serial,
-                    timestamp: time,
-                    key: key + 8, // TODO: understand the magic 8.
-                    state,
-                    queue: keyqueue,
-                })
+                // tracing::trace!(
+                //     "key stroke registered {:?} {:?} {:?} {:?}",
+                //     time,
+                //     serial,
+                //     key,
+                //     state
+                // );
+                // self.keystroke(&CachedKeyPress {
+                //     repeat: false,
+                //     seat,
+                //     serial,
+                //     timestamp: time,
+                //     key: key + 8, // TODO: understand the magic 8.
+                //     state,
+                //     queue: keyqueue,
+                // })
             }
             wl_keyboard::Event::Modifiers { .. } => {
                 self.xkb_mods.replace(event_to_mods(event));
@@ -428,75 +428,75 @@ impl Default for Manager {
     }
 }
 
-impl Manager {
-    pub(super) fn attach(
-        &self,
-        id: u32,
-        seat: wlc::Main<wl_seat::WlSeat>,
-    ) -> wlc::Main<wl_keyboard::WlKeyboard> {
-        let keyboard = seat.get_keyboard();
-        keyboard.quick_assign({
-            let tx = self.inner.tx.clone();
-            let queue = self.inner.apptx.clone();
-            move |_, event, _| {
-                if let Err(cause) = tx.send((id, event, queue.clone())) {
-                    tracing::error!("failed to transmit keyboard event {:?}", cause);
-                };
-            }
-        });
+// impl Manager {
+//     pub(super) fn attach(
+//         &self,
+//         id: u32,
+//         seat: wlc::Main<wl_seat::WlSeat>,
+//     ) -> wlc::Main<wl_keyboard::WlKeyboard> {
+//         let keyboard = seat.get_keyboard();
+//         keyboard.quick_assign({
+//             let tx = self.inner.tx.clone();
+//             let queue = self.inner.apptx.clone();
+//             move |_, event, _| {
+//                 if let Err(cause) = tx.send((id, event, queue.clone())) {
+//                     tracing::error!("failed to transmit keyboard event {:?}", cause);
+//                 };
+//             }
+//         });
 
-        keyboard
-    }
+//         keyboard
+//     }
 
-    // TODO turn struct into a calloop event source.
-    pub(super) fn events(&self, handle: &calloop::LoopHandle<std::sync::Arc<Data>>) {
-        let rx = self.inner.apprx.borrow_mut().take().unwrap();
-        handle
-            .insert_source(rx, {
-                move |evt, _ignored, appdata| {
-                    let evt = match evt {
-                        calloop::channel::Event::Msg(e) => e,
-                        calloop::channel::Event::Closed => {
-                            tracing::info!("keyboard events receiver closed");
-                            return;
-                        }
-                    };
+//     // TODO turn struct into a calloop event source.
+//     pub(super) fn events(&self, handle: &calloop::LoopHandle<std::sync::Arc<Data>>) {
+//         let rx = self.inner.apprx.borrow_mut().take().unwrap();
+//         handle
+//             .insert_source(rx, {
+//                 move |evt, _ignored, appdata| {
+//                     let evt = match evt {
+//                         calloop::channel::Event::Msg(e) => e,
+//                         calloop::channel::Event::Closed => {
+//                             tracing::info!("keyboard events receiver closed");
+//                             return;
+//                         }
+//                     };
 
-                    if let Some(winhandle) = appdata.acquire_current_window() {
-                        if let Some(windata) = winhandle.data() {
-                            windata.with_handler({
-                                let windata = windata.clone();
-                                let evt = evt;
-                                move |handler| match evt.state {
-                                    KeyState::Up => {
-                                        handler.key_up(evt.clone());
-                                        tracing::trace!(
-                                            "key press event up {:?} {:?}",
-                                            evt,
-                                            windata.active_text_input.get()
-                                        );
-                                    }
-                                    KeyState::Down => {
-                                        let handled = text::simulate_input(
-                                            handler,
-                                            windata.active_text_input.get(),
-                                            evt.clone(),
-                                        );
-                                        tracing::trace!(
-                                            "key press event down {:?} {:?} {:?}",
-                                            handled,
-                                            evt,
-                                            windata.active_text_input.get()
-                                        );
-                                    }
-                                }
-                            });
-                        }
-                    }
-                }
-            })
-            .unwrap();
-    }
-}
+//                     if let Some(winhandle) = appdata.acquire_current_window() {
+//                         if let Some(windata) = winhandle.data() {
+//                             windata.with_handler({
+//                                 let windata = windata.clone();
+//                                 let evt = evt;
+//                                 move |handler| match evt.state {
+//                                     KeyState::Up => {
+//                                         handler.key_up(evt.clone());
+//                                         tracing::trace!(
+//                                             "key press event up {:?} {:?}",
+//                                             evt,
+//                                             windata.active_text_input.get()
+//                                         );
+//                                     }
+//                                     KeyState::Down => {
+//                                         let handled = text::simulate_input(
+//                                             handler,
+//                                             windata.active_text_input.get(),
+//                                             evt.clone(),
+//                                         );
+//                                         tracing::trace!(
+//                                             "key press event down {:?} {:?} {:?}",
+//                                             handled,
+//                                             evt,
+//                                             windata.active_text_input.get()
+//                                         );
+//                                     }
+//                                 }
+//                             });
+//                         }
+//                     }
+//                 }
+//             })
+//             .unwrap();
+//     }
+// }
 
 delegate_dispatch!(Data: [ WlKeyboard: GlazierKeyboardData] => SeatState);

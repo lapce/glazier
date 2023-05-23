@@ -13,21 +13,25 @@
 
 #![allow(clippy::single_match)]
 
-use std::cell::RefCell;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::{cell::RefCell, sync::Weak};
 
 use sctk_adwaita::AdwaitaFrame;
+use smithay_client_toolkit::seat::pointer::ThemedPointer;
 use smithay_client_toolkit::{
     compositor::{CompositorState, Region, SurfaceData},
     reexports::{
-        client::{protocol::wl_surface::WlSurface, Proxy, QueueHandle},
+        client::{
+            protocol::{wl_display::WlDisplay, wl_surface::WlSurface},
+            Proxy, QueueHandle,
+        },
         protocols::wp::viewporter::client::wp_viewport::WpViewport,
     },
     shell::{
         xdg::{
-            frame::DecorationsFrame,
+            frame::{DecorationsFrame, FrameAction, FrameClick},
             window::{DecorationMode, Window, WindowConfigure, WindowDecorations},
             XdgSurface,
         },
@@ -37,6 +41,9 @@ use smithay_client_toolkit::{
     subcompositor::SubcompositorState,
 };
 use tracing;
+use wayland_client::protocol::wl_seat::WlSeat;
+use wayland_client::protocol::wl_shm::WlShm;
+use wayland_client::Connection;
 use wayland_protocols::xdg_shell::client::xdg_popup;
 use wayland_protocols::xdg_shell::client::xdg_positioner;
 use wayland_protocols::xdg_shell::client::xdg_surface;
@@ -47,6 +54,8 @@ use raw_window_handle::{
 };
 
 use super::application::{self, Timer};
+use super::outputs::Position;
+use super::pointer::{GlazierPointerData, GlazierPointerDataExt};
 use super::surfaces::idle;
 use super::{application::Data, output::MonitorHandle};
 use super::{error::Error, menu::Menu, outputs, surfaces};
@@ -61,14 +70,24 @@ use crate::{
     window::{self, FileDialogToken, TimerToken, WinHandler, WindowLevel},
     TextFieldToken,
 };
+use crate::{Modifiers, PointerEvent};
 
 pub use surfaces::idle::Handle as IdleHandle;
 
 // holds references to the various components for a window implementation.
 struct Inner {
     pub(super) id: u64,
+
+    pub(super) connection: Connection,
+
     /// Reference to the underlying SCTK window.
     pub(super) window: Window,
+
+    /// The `Shm` to set cursor.
+    pub(super) shm: WlShm,
+
+    /// The wayland display used solely for raw window handle.
+    pub(super) display: WlDisplay,
 
     pub(super) queue_handle: QueueHandle<Data>,
 
@@ -101,6 +120,15 @@ struct Inner {
     /// sends `None` for the new size in the configure.
     stateless_size: Size,
 
+    /// Cursor icon.
+    pub cursor_icon: &'static str,
+
+    /// Wether the cursor is visible.
+    pub cursor_visible: bool,
+
+    /// The pointers observed on the window.
+    pub pointers: Vec<Weak<ThemedPointer<GlazierPointerData>>>,
+
     viewport: Option<WpViewport>,
 
     // pub(super) decor: Box<dyn surfaces::Decor>,
@@ -126,11 +154,75 @@ impl Inner {
             tracing::trace!("Failed to mark window opaque.");
         }
     }
+
+    /// Reload the cursor style on the given window.
+    pub fn reload_cursor_style(&mut self) {
+        if self.cursor_visible {
+            self.set_cursor(self.cursor_icon);
+        } else {
+            self.set_cursor_visible(self.cursor_visible);
+        }
+    }
+
+    /// Set the visibility state of the cursor.
+    pub fn set_cursor_visible(&mut self, cursor_visible: bool) {
+        self.cursor_visible = cursor_visible;
+
+        for pointer in self.pointers.iter().filter_map(|pointer| pointer.upgrade()) {
+            let latest_enter_serial = pointer.pointer().glazier_data().latest_enter_serial();
+
+            pointer
+                .pointer()
+                .set_cursor(latest_enter_serial, None, 0, 0);
+        }
+    }
+
+    /// Set the cursor icon.
+    ///
+    /// Providing `None` will hide the cursor.
+    pub fn set_cursor(&mut self, cursor_icon: &'static str) {
+        self.cursor_icon = cursor_icon;
+
+        if !self.cursor_visible {
+            return;
+        }
+
+        self.apply_on_poiner(|pointer, data| {
+            let surface = data.cursor_surface();
+            let scale_factor = surface.data::<SurfaceData>().unwrap().scale_factor();
+
+            if pointer
+                .set_cursor(
+                    &self.connection,
+                    cursor_icon,
+                    &self.shm,
+                    surface,
+                    scale_factor,
+                )
+                .is_err()
+            {
+                tracing::warn!("Failed to set cursor to {:?}", cursor_icon);
+            }
+        })
+    }
+
+    fn apply_on_poiner<F: Fn(&ThemedPointer<GlazierPointerData>, &GlazierPointerData)>(
+        &self,
+        callback: F,
+    ) {
+        self.pointers
+            .iter()
+            .filter_map(Weak::upgrade)
+            .for_each(|pointer| {
+                let data = pointer.pointer().glazier_data();
+                callback(pointer.as_ref(), data);
+            })
+    }
 }
 
 #[derive(Clone)]
 pub struct WindowHandle {
-    inner: Rc<RefCell<Option<Inner>>>,
+    pub(super) inner: Rc<RefCell<Option<Inner>>>,
 }
 
 impl surfaces::Outputs for WindowHandle {
@@ -139,22 +231,20 @@ impl surfaces::Outputs for WindowHandle {
     fn inserted(&self, o: &outputs::Meta) {}
 }
 
-impl surfaces::Popup for WindowHandle {
-    fn surface(
-        &self,
-        popup: &wayland_client::Main<xdg_surface::XdgSurface>,
-        pos: &wayland_client::Main<xdg_positioner::XdgPositioner>,
-    ) -> Result<wayland_client::Main<xdg_popup::XdgPopup>, Error> {
-        Err(Error::string("no popup"))
-    }
-}
+// impl surfaces::Popup for WindowHandle {
+//     fn surface(
+//         &self,
+//         popup: &wayland_client::Main<xdg_surface::XdgSurface>,
+//         pos: &wayland_client::Main<xdg_positioner::XdgPositioner>,
+//     ) -> Result<wayland_client::Main<xdg_popup::XdgPopup>, Error> {
+//         Err(Error::string("no popup"))
+//     }
+// }
 
 impl WindowHandle {
     pub(super) fn new(
         outputs: impl Into<Box<dyn surfaces::Outputs>>,
         decor: impl Into<Box<dyn surfaces::Decor>>,
-        surface: impl Into<Box<dyn surfaces::Handle>>,
-        popup: impl Into<Box<dyn surfaces::Popup>>,
         appdata: Rc<RefCell<application::Data>>,
     ) -> Self {
         Self {
@@ -175,6 +265,7 @@ impl WindowHandle {
                 && inner.frame.is_none()
                 && !inner.csd_fails
             {
+                println!("client decoration");
                 match AdwaitaFrame::new(
                     &inner.window,
                     shm,
@@ -183,6 +274,7 @@ impl WindowHandle {
                     sctk_adwaita::FrameConfig::auto(),
                 ) {
                     Ok(mut frame) => {
+                        println!("adwait frame");
                         frame.set_title(&inner.title);
                         // Ensure that the frame is not hidden.
                         frame.set_hidden(false);
@@ -230,6 +322,8 @@ impl WindowHandle {
             new_size
         };
 
+        println!("set size {new_size}");
+
         // XXX Update the new size right away.
         self.set_size(new_size);
 
@@ -251,6 +345,100 @@ impl WindowHandle {
 
     pub fn id(&self) -> u64 {
         self.inner.borrow().as_ref().unwrap().id
+    }
+
+    pub fn frame_point_left(&mut self) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(inner) = inner.as_mut() {
+            if let Some(frame) = inner.frame.as_mut() {
+                frame.click_point_left();
+            }
+        }
+    }
+
+    // Move the point over decorations.
+    pub fn frame_point_moved(&mut self, surface: &WlSurface, x: f64, y: f64) -> Option<String> {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(inner) = inner.as_mut() {
+            if let Some(frame) = inner.frame.as_mut() {
+                frame
+                    .click_point_moved(surface, x, y)
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Tells whether the window should be closed.
+    pub fn frame_click(
+        &mut self,
+        click: FrameClick,
+        pressed: bool,
+        seat: &WlSeat,
+        serial: u32,
+        window_id: u64,
+        updates: &mut Vec<WindowCompositorUpdate>,
+    ) -> Option<bool> {
+        let mut inner = self.inner.borrow_mut();
+        let inner = inner.as_mut()?;
+        match inner.frame.as_mut()?.on_click(click, pressed)? {
+            FrameAction::Minimize => inner.window.set_minimized(),
+            FrameAction::Maximize => inner.window.set_maximized(),
+            FrameAction::UnMaximize => inner.window.unset_maximized(),
+            FrameAction::Close => {
+                // WinitState::queue_close(updates, window_id);
+            }
+            FrameAction::Move => inner.window.move_(seat, serial),
+            FrameAction::Resize(edge) => inner.window.resize(seat, serial, edge),
+            FrameAction::ShowMenu(x, y) => inner.window.show_window_menu(seat, serial, (x, y)),
+        };
+
+        Some(false)
+    }
+
+    /// Register pointer on the top-level.
+    pub(super) fn pointer_entered(
+        &self,
+        added: Weak<ThemedPointer<GlazierPointerData>>,
+        position: Point,
+        modifiers: Modifiers,
+    ) {
+        let mut inner = self.inner.borrow_mut();
+
+        if let Some(inner) = inner.as_mut() {
+            inner.pointers.push(added);
+            inner.reload_cursor_style();
+            inner.handler.borrow_mut().pointer_move(&PointerEvent {
+                pos: position,
+                modifiers,
+                ..Default::default()
+            });
+        }
+
+        // let mode = self.cursor_grab_mode.user_grab_mode;
+        // let _ = self.set_cursor_grab_inner(mode);
+    }
+
+    /// Pointer has left the top-level.
+    pub(super) fn pointer_left(&mut self, removed: Weak<ThemedPointer<GlazierPointerData>>) {
+        let mut inner = self.inner.borrow_mut();
+
+        if let Some(inner) = inner.as_mut() {
+            let mut new_pointers = Vec::new();
+            for pointer in inner.pointers.drain(..) {
+                if let Some(pointer) = pointer.upgrade() {
+                    if pointer.pointer() != removed.upgrade().unwrap().pointer() {
+                        new_pointers.push(Arc::downgrade(&pointer));
+                    }
+                }
+            }
+
+            inner.pointers = new_pointers;
+            inner.handler.borrow_mut().pointer_leave();
+        }
     }
 
     pub fn show(&self) {
@@ -537,7 +725,7 @@ impl WindowHandle {
         idle::run(&self.get_idle_handle().unwrap(), &mut **handler);
     }
 
-    pub(super) fn data(&self) -> Option<std::sync::Arc<surfaces::surface::Data>> {
+    pub(super) fn data(&self) -> Option<std::sync::Arc<Data>> {
         todo!()
     }
 
@@ -568,15 +756,26 @@ impl Default for WindowHandle {
 
 unsafe impl HasRawWindowHandle for WindowHandle {
     fn raw_window_handle(&self) -> RawWindowHandle {
-        tracing::error!("HasRawWindowHandle trait not implemented for wasm.");
-        RawWindowHandle::Wayland(WaylandWindowHandle::empty())
+        let mut window_handle = WaylandWindowHandle::empty();
+        window_handle.surface = self
+            .inner
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .window
+            .wl_surface()
+            .id()
+            .as_ptr() as *mut _;
+        RawWindowHandle::Wayland(window_handle)
     }
 }
 
 unsafe impl HasRawDisplayHandle for WindowHandle {
     fn raw_display_handle(&self) -> RawDisplayHandle {
-        tracing::error!("HasDisplayHandle trait not implemented for wayland.");
-        RawDisplayHandle::Wayland(WaylandDisplayHandle::empty())
+        let mut display_handle = WaylandDisplayHandle::empty();
+        display_handle.display =
+            self.inner.borrow().as_ref().unwrap().display.id().as_ptr() as *mut _;
+        RawDisplayHandle::Wayland(display_handle)
     }
 }
 
@@ -680,13 +879,13 @@ impl WindowBuilder {
 
         let level = self.level.clone();
 
-        if let WindowLevel::Modal(parent) = level {
-            return self.create_popup(parent);
-        }
+        // if let WindowLevel::Modal(parent) = level {
+        //     return self.create_popup(parent);
+        // }
 
-        if let WindowLevel::DropDown(parent) = level {
-            return self.create_popup(parent);
-        }
+        // if let WindowLevel::DropDown(parent) = level {
+        //     return self.create_popup(parent);
+        // }
 
         let handler = Rc::new(RefCell::new(
             self.handler.expect("must set a window handler"),
@@ -711,12 +910,18 @@ impl WindowBuilder {
         let handle = WindowHandle {
             inner: Rc::new(RefCell::new(Some(Inner {
                 id: make_wid(window.wl_surface()),
+                connection: appdata.connection.clone(),
                 window,
+                display: appdata.connection.display(),
+                shm: appdata.shm.wl_shm().clone(),
                 handler: handler.clone(),
                 queue_handle: appdata.queue_handle.clone(),
                 compositor_state: appdata.compositor_state.clone(),
                 frame: None,
                 last_configure: None,
+                cursor_icon: "default",
+                cursor_visible: true,
+                pointers: Default::default(),
                 title: self.title,
                 transparent: false,
                 size: self.size,
@@ -775,194 +980,194 @@ impl WindowBuilder {
         Ok(handle)
     }
 
-    fn create_popup(self, parent: window::WindowHandle) -> Result<WindowHandle, ShellError> {
-        let dim = self.min_size.unwrap_or(Size::ZERO);
-        let dim = Size::new(dim.width.max(1.), dim.height.max(1.));
-        let dim = Size::new(
-            self.size.width.max(dim.width),
-            self.size.height.max(dim.height),
-        );
+    // fn create_popup(self, parent: window::WindowHandle) -> Result<WindowHandle, ShellError> {
+    //     let dim = self.min_size.unwrap_or(Size::ZERO);
+    //     let dim = Size::new(dim.width.max(1.), dim.height.max(1.));
+    //     let dim = Size::new(
+    //         self.size.width.max(dim.width),
+    //         self.size.height.max(dim.height),
+    //     );
 
-        let config = surfaces::popup::Config::default()
-            .with_size(dim)
-            .with_offset(Into::into(
-                self.position.unwrap_or_else(|| Into::into((0., 0.))),
-            ));
+    //     let config = surfaces::popup::Config::default()
+    //         .with_size(dim)
+    //         .with_offset(Into::into(
+    //             self.position.unwrap_or_else(|| Into::into((0., 0.))),
+    //         ));
 
-        tracing::debug!("popup {:?}", config);
+    //     tracing::debug!("popup {:?}", config);
 
-        match &parent.0 {
-            crate::backend::window::WindowHandle::X11(_) => Err(ShellError::Other(
-                anyhow::anyhow!("wrong window handle").into(),
-            )),
-            crate::backend::window::WindowHandle::Wayland(parent) => {
-                popup::create(parent, &config, self.app.data, self.handler)
-            }
-        }
-    }
+    //     match &parent.0 {
+    //         crate::backend::window::WindowHandle::X11(_) => Err(ShellError::Other(
+    //             anyhow::anyhow!("wrong window handle").into(),
+    //         )),
+    //         crate::backend::window::WindowHandle::Wayland(parent) => {
+    //             popup::create(parent, &config, self.app.data, self.handler)
+    //         }
+    //     }
+    // }
 }
 
-#[allow(unused)]
-pub mod layershell {
-    use std::cell::RefCell;
-    use std::rc::Rc;
+// #[allow(unused)]
+// pub mod layershell {
+//     use std::cell::RefCell;
+//     use std::rc::Rc;
 
-    use crate::error::Error as ShellError;
-    use crate::window::WinHandler;
+//     use crate::error::Error as ShellError;
+//     use crate::window::WinHandler;
 
-    use super::WindowHandle;
-    use crate::backend::wayland::application::{Application, Data};
-    use crate::backend::wayland::error::Error;
-    use crate::backend::wayland::surfaces;
+//     use super::WindowHandle;
+//     use crate::backend::wayland::application::{Application, Data};
+//     use crate::backend::wayland::error::Error;
+//     use crate::backend::wayland::surfaces;
 
-    /// Builder abstraction for creating new windows
-    pub(crate) struct Builder {
-        appdata: Rc<RefCell<Data>>,
-        winhandle: Option<Box<dyn WinHandler>>,
-        pub(crate) config: surfaces::layershell::Config,
-    }
+//     /// Builder abstraction for creating new windows
+//     pub(crate) struct Builder {
+//         appdata: Rc<RefCell<Data>>,
+//         winhandle: Option<Box<dyn WinHandler>>,
+//         pub(crate) config: surfaces::layershell::Config,
+//     }
 
-    impl Builder {
-        pub fn new(app: Application) -> Builder {
-            Builder {
-                appdata: app.data,
-                config: surfaces::layershell::Config::default(),
-                winhandle: None,
-            }
-        }
+//     impl Builder {
+//         pub fn new(app: Application) -> Builder {
+//             Builder {
+//                 appdata: app.data,
+//                 config: surfaces::layershell::Config::default(),
+//                 winhandle: None,
+//             }
+//         }
 
-        pub fn set_handler(&mut self, handler: Box<dyn WinHandler>) {
-            self.winhandle = Some(handler);
-        }
+//         pub fn set_handler(&mut self, handler: Box<dyn WinHandler>) {
+//             self.winhandle = Some(handler);
+//         }
 
-        pub fn build(self) -> Result<WindowHandle, ShellError> {
-            let appdata = self.appdata.clone();
+//         pub fn build(self) -> Result<WindowHandle, ShellError> {
+//             let appdata = self.appdata.clone();
 
-            let winhandle = match self.winhandle {
-                Some(winhandle) => winhandle,
-                None => {
-                    return Err(ShellError::Platform(
-                        crate::backend::linux::error::Error::Wayland(Error::string(
-                            "window handler required",
-                        )),
-                    ))
-                }
-            };
+//             let winhandle = match self.winhandle {
+//                 Some(winhandle) => winhandle,
+//                 None => {
+//                     return Err(ShellError::Platform(
+//                         crate::backend::linux::error::Error::Wayland(Error::string(
+//                             "window handler required",
+//                         )),
+//                     ))
+//                 }
+//             };
 
-            let surface =
-                surfaces::layershell::Surface::new(appdata.clone(), winhandle, self.config.clone());
+//             // let surface =
+//             //     surfaces::layershell::Surface::new(appdata.clone(), winhandle, self.config.clone());
 
-            let handle = WindowHandle::new(
-                surface.clone(),
-                surfaces::surface::Dead::default(),
-                surface.clone(),
-                surface.clone(),
-                self.appdata.clone(),
-            );
+//             let handle = WindowHandle::new(
+//                 surface.clone(),
+//                 surfaces::surface::Dead::default(),
+//                 surface.clone(),
+//                 surface.clone(),
+//                 self.appdata.clone(),
+//             );
 
-            if appdata
-                .borrow()
-                .handles
-                .borrow_mut()
-                .insert(handle.id(), handle.clone())
-                .is_some()
-            {
-                panic!("wayland should use unique object IDs");
-            }
-            appdata
-                .borrow()
-                .active_surface_id
-                .borrow_mut()
-                .push_front(handle.id());
+//             if appdata
+//                 .borrow()
+//                 .handles
+//                 .borrow_mut()
+//                 .insert(handle.id(), handle.clone())
+//                 .is_some()
+//             {
+//                 panic!("wayland should use unique object IDs");
+//             }
+//             appdata
+//                 .borrow()
+//                 .active_surface_id
+//                 .borrow_mut()
+//                 .push_front(handle.id());
 
-            surface.with_handler({
-                let handle = handle.clone();
-                let handle = crate::backend::window::WindowHandle::Wayland(handle);
-                move |winhandle| winhandle.connect(&handle.into())
-            });
+//             surface.with_handler({
+//                 let handle = handle.clone();
+//                 let handle = crate::backend::window::WindowHandle::Wayland(handle);
+//                 move |winhandle| winhandle.connect(&handle.into())
+//             });
 
-            Ok(handle)
-        }
-    }
-}
+//             Ok(handle)
+//         }
+//     }
+// }
 
-#[allow(unused)]
-pub mod popup {
-    use std::cell::RefCell;
-    use std::rc::Rc;
+// #[allow(unused)]
+// pub mod popup {
+//     use std::cell::RefCell;
+//     use std::rc::Rc;
 
-    use crate::error::Error as ShellError;
-    use crate::window::WinHandler;
+//     use crate::error::Error as ShellError;
+//     use crate::window::WinHandler;
 
-    use super::WindowBuilder;
-    use super::WindowHandle;
-    use crate::backend::wayland::application::{Application, Data};
-    use crate::backend::wayland::error::Error;
-    use crate::backend::wayland::surfaces;
+//     use super::WindowBuilder;
+//     use super::WindowHandle;
+//     use crate::backend::wayland::application::{Application, Data};
+//     use crate::backend::wayland::error::Error;
+//     use crate::backend::wayland::surfaces;
 
-    pub(super) fn create(
-        parent: &WindowHandle,
-        config: &surfaces::popup::Config,
-        wappdata: Rc<RefCell<Data>>,
-        winhandle: Option<Box<dyn WinHandler>>,
-    ) -> Result<WindowHandle, ShellError> {
-        let appdata = wappdata.clone();
+//     pub(super) fn create(
+//         parent: &WindowHandle,
+//         config: &surfaces::popup::Config,
+//         wappdata: Rc<RefCell<Data>>,
+//         winhandle: Option<Box<dyn WinHandler>>,
+//     ) -> Result<WindowHandle, ShellError> {
+//         let appdata = wappdata.clone();
 
-        let winhandle = match winhandle {
-            Some(winhandle) => winhandle,
-            None => {
-                return Err(ShellError::Platform(
-                    crate::backend::linux::error::Error::Wayland(Error::string(
-                        "window handler required",
-                    )),
-                ))
-            }
-        };
+//         let winhandle = match winhandle {
+//             Some(winhandle) => winhandle,
+//             None => {
+//                 return Err(ShellError::Platform(
+//                     crate::backend::linux::error::Error::Wayland(Error::string(
+//                         "window handler required",
+//                     )),
+//                 ))
+//             }
+//         };
 
-        // compute the initial window size.
-        let updated = config.clone();
-        let surface =
-            match surfaces::popup::Surface::new(appdata.clone(), winhandle, updated, parent) {
-                Err(cause) => {
-                    return Err(ShellError::Platform(
-                        crate::backend::linux::error::Error::Wayland(cause),
-                    ))
-                }
-                Ok(s) => s,
-            };
+//         // compute the initial window size.
+//         let updated = config.clone();
+//         let surface =
+//             match surfaces::popup::Surface::new(appdata.clone(), winhandle, updated, parent) {
+//                 Err(cause) => {
+//                     return Err(ShellError::Platform(
+//                         crate::backend::linux::error::Error::Wayland(cause),
+//                     ))
+//                 }
+//                 Ok(s) => s,
+//             };
 
-        let handle = WindowHandle::new(
-            surface.clone(),
-            surfaces::surface::Dead::default(),
-            surface.clone(),
-            surface.clone(),
-            wappdata,
-        );
+//         let handle = WindowHandle::new(
+//             surface.clone(),
+//             surfaces::surface::Dead::default(),
+//             surface.clone(),
+//             surface.clone(),
+//             wappdata,
+//         );
 
-        if appdata
-            .borrow()
-            .handles
-            .borrow_mut()
-            .insert(handle.id(), handle.clone())
-            .is_some()
-        {
-            panic!("wayland should use unique object IDs");
-        }
-        appdata
-            .borrow()
-            .active_surface_id
-            .borrow_mut()
-            .push_front(handle.id());
+//         if appdata
+//             .borrow()
+//             .handles
+//             .borrow_mut()
+//             .insert(handle.id(), handle.clone())
+//             .is_some()
+//         {
+//             panic!("wayland should use unique object IDs");
+//         }
+//         appdata
+//             .borrow()
+//             .active_surface_id
+//             .borrow_mut()
+//             .push_front(handle.id());
 
-        surface.with_handler({
-            let handle = handle.clone();
-            let handle = crate::backend::window::WindowHandle::Wayland(handle);
-            move |winhandle| winhandle.connect(&handle.into())
-        });
+//         surface.with_handler({
+//             let handle = handle.clone();
+//             let handle = crate::backend::window::WindowHandle::Wayland(handle);
+//             move |winhandle| winhandle.connect(&handle.into())
+//         });
 
-        Ok(handle)
-    }
-}
+//         Ok(handle)
+//     }
+// }
 
 // The window update comming from the compositor.
 #[derive(Debug, Clone, Copy)]

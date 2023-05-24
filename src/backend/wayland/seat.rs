@@ -7,9 +7,8 @@ use smithay_client_toolkit::{
 
 use crate::Modifiers;
 
-use super::pointer::GlazierPointerData;
+use super::{keyboard::KeyboardState, pointer::GlazierPointerData};
 
-#[derive(Debug)]
 pub(super) struct GlazierSeatState {
     /// The pointer bound on the seat.
     pub(super) pointer: Option<Arc<ThemedPointer<GlazierPointerData>>>,
@@ -19,6 +18,12 @@ pub(super) struct GlazierSeatState {
 
     /// The current modifiers state on the seat.
     pub(super) modifiers: Modifiers,
+
+    /// Wether we have pending modifiers.
+    pub(super) modifiers_pending: bool,
+
+    /// The keyboard bound on the seat.
+    pub(super) keyboard_state: Option<KeyboardState>,
 }
 
 impl GlazierSeatState {
@@ -27,6 +32,8 @@ impl GlazierSeatState {
             pointer: None,
             relative_pointer: None,
             modifiers: Modifiers::empty(),
+            modifiers_pending: false,
+            keyboard_state: None,
         }
     }
 }

@@ -17,8 +17,7 @@
 use super::{
     clipboard,
     error::Error,
-    keyboard::{self},
-    outputs,
+    keyboard, outputs,
     relative_pointer::RelativePointerState,
     seat::GlazierSeatState,
     window::{make_wid, WindowCompositorUpdate, WindowHandle},
@@ -27,7 +26,12 @@ use super::{
 use crate::{
     backend::{
         self,
-        wayland::{output::MonitorHandle, pointer::GlazierPointerData},
+        shared::xkb::keycodes::map_key,
+        wayland::{
+            keyboard::{KeyboardData, KeyboardState},
+            output::MonitorHandle,
+            pointer::GlazierPointerData,
+        },
     },
     mouse, AppHandler, TimerToken,
 };
@@ -39,7 +43,7 @@ use smithay_client_toolkit::{
     delegate_subcompositor, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     reexports::{
-        calloop::EventLoop,
+        calloop::{EventLoop, LoopHandle},
         client::{
             self, backend::ObjectId, globals::registry_queue_init, Connection, Proxy, QueueHandle,
         },
@@ -47,6 +51,7 @@ use smithay_client_toolkit::{
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
+        keyboard::KeyEvent,
         pointer::{ThemeSpec, ThemedPointer},
         SeatHandler, SeatState,
     },
@@ -193,7 +198,7 @@ pub struct Data {
     pub relative_pointer: Option<RelativePointerState>,
 
     /// Handles to any surfaces that have been created.
-    pub(super) handles: RefCell<im::OrdMap<u64, WindowHandle>>,
+    pub(super) handles: Rc<RefCell<im::OrdMap<u64, WindowHandle>>>,
 
     /// Available pixel formats
     pub(super) formats: RefCell<Vec<wl_shm::Format>>,
@@ -223,6 +228,8 @@ pub struct Data {
     // clipboard: clipboard::Manager,
     // wakeup events when outputs are added/removed.
     // outputsqueue: RefCell<Option<calloop::channel::Channel<outputs::Event>>>,
+    /// Loop handle to re-register event sources, such as keyboard repeat.
+    pub loop_handle: LoopHandle<'static, Self>,
 }
 
 impl Application {
@@ -343,6 +350,8 @@ impl Application {
         //     CursorTheme::load(64, &wl_shm),
         //     wl_compositor.create_surface(),
         // );
+        let event_loop = smithay_client_toolkit::reexports::calloop::EventLoop::<Data>::try_new()
+            .map_err(|e| Error::string(e.to_string()))?;
 
         // We need to have keyboard events set up for our seats before the next roundtrip.
         let appdata = Rc::new(RefCell::new(Data {
@@ -363,7 +372,7 @@ impl Application {
             outputs: Rc::new(RefCell::new(BTreeMap::new())),
             seats,
             pointer_surfaces: Default::default(),
-            handles: RefCell::new(im::OrdMap::new()),
+            handles: Rc::new(RefCell::new(im::OrdMap::new())),
             formats: RefCell::new(vec![]),
             shutdown: Cell::new(false),
             active_surface_id: RefCell::new(std::collections::VecDeque::with_capacity(20)),
@@ -378,6 +387,7 @@ impl Application {
             roundtrip_requested: RefCell::new(false),
             // outputsqueue: RefCell::new(Some(outputqueue)),
             // wayland: std::rc::Rc::new(env),
+            loop_handle: event_loop.handle(),
         }));
 
         event_queue
@@ -391,8 +401,6 @@ impl Application {
             |_, queue, data| queue.dispatch_pending(data),
         );
 
-        let event_loop = smithay_client_toolkit::reexports::calloop::EventLoop::<Data>::try_new()
-            .map_err(|e| Error::string(e.to_string()))?;
         event_loop
             .handle()
             .register_dispatcher(wayland_dispatcher.clone())
@@ -861,22 +869,11 @@ impl SeatHandler for Data {
             // Capability::Touch if seat_state.touch.is_none() => {
             //     seat_state.touch = self.seat_state.get_touch(queue_handle, &seat).ok();
             // }
-            // Capability::Keyboard if seat_state.keyboard_state.is_none() => {
-            //     let keyboard = self
-            //         .seat_state
-            //         .get_keyboard_with_repeat_with_data(
-            //             queue_handle,
-            //             &seat,
-            //             WinitKeyboardData::new(seat.clone()),
-            //             self.loop_handle.clone(),
-            //             Box::new(|state, keyboard, event| {
-            //                 state.handle_key_input(keyboard, event, ElementState::Pressed);
-            //             }),
-            //         )
-            //         .expect("failed to create keyboard with present capability.");
-
-            //     seat_state.keyboard_state = Some(KeyboardState { keyboard });
-            // }
+            Capability::Keyboard if seat_state.keyboard_state.is_none() => {
+                let keyboard = seat.get_keyboard(qh, KeyboardData::new(seat.clone()));
+                seat_state.keyboard_state =
+                    Some(KeyboardState::new(keyboard, self.loop_handle.clone()));
+            }
             Capability::Pointer if seat_state.pointer.is_none() => {
                 let surface = self.compositor_state.create_surface(qh);
                 let surface_id = surface.id();

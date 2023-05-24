@@ -16,18 +16,18 @@
 
 pub mod application;
 pub mod clipboard;
-mod display;
+pub mod display;
 pub mod error;
-mod events;
+pub mod events;
 pub mod keyboard;
 pub mod menu;
-mod output;
-mod outputs;
-mod pointer;
+pub mod output;
+pub mod outputs;
+pub mod pointer;
 pub mod pointers;
-mod relative_pointer;
+pub mod relative_pointer;
 pub mod screen;
-mod seat;
+pub mod seat;
 pub mod surfaces;
 pub mod window;
 

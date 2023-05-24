@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use kurbo::Point;
+use kurbo::{Point, Vec2};
 use smithay_client_toolkit::{
     compositor::SurfaceData,
     reexports::client::{
@@ -18,7 +18,7 @@ use smithay_client_toolkit::{
 };
 use wayland_client::Proxy;
 
-use crate::{MouseButton, PointerEvent};
+use crate::{pointer::MouseInfo, MouseButton, PointerEvent, PointerType};
 
 use super::{application::Data, window::make_wid};
 
@@ -151,9 +151,8 @@ impl PointerHandler for Data {
                     }
                 }
                 PointerEventKind::Motion { .. } => {
-                    let inner = handle.inner.borrow();
-                    if let Some(inner) = inner.as_ref() {
-                        inner.handler.borrow_mut().pointer_move(&PointerEvent {
+                    if let Some(handler) = handle.handler() {
+                        handler.borrow_mut().pointer_move(&PointerEvent {
                             pos: position,
                             modifiers,
                             ..Default::default()
@@ -171,8 +170,7 @@ impl PointerHandler for Data {
                         .latest_button_serial = serial;
 
                     let button = wayland_button_to_glazier(button);
-                    let inner = handle.inner.borrow();
-                    if let Some(inner) = inner.as_ref() {
+                    if let Some(handler) = handle.handler() {
                         let event = PointerEvent {
                             button: button.into(),
                             pos: position,
@@ -180,22 +178,36 @@ impl PointerHandler for Data {
                             ..Default::default()
                         };
                         if matches!(kind, PointerEventKind::Press { .. }) {
-                            inner.handler.borrow_mut().pointer_down(&event);
+                            handler.borrow_mut().pointer_down(&event);
                         } else {
-                            inner.handler.borrow_mut().pointer_up(&event);
+                            handler.borrow_mut().pointer_up(&event);
                         }
                     }
-                    self.events_sink.push_window_event(
-                        WindowEvent::MouseInput {
-                            device_id,
-                            state,
-                            button,
-                            modifiers,
-                        },
-                        window_id,
-                    );
                 }
-                _ => {}
+                PointerEventKind::Axis {
+                    horizontal,
+                    vertical,
+                    ..
+                } => {
+                    let has_discrete_scroll = horizontal.discrete != 0 || vertical.discrete != 0;
+
+                    let delta = if has_discrete_scroll {
+                        Vec2::new(-horizontal.discrete as f64, -vertical.discrete as f64)
+                    } else {
+                        Vec2::new(-horizontal.absolute, -vertical.absolute)
+                    };
+
+                    let event = PointerEvent {
+                        pos: position,
+                        modifiers,
+                        pointer_type: PointerType::Mouse(MouseInfo { wheel_delta: delta }),
+                        ..Default::default()
+                    };
+
+                    if let Some(handler) = handle.handler() {
+                        handler.borrow_mut().wheel(&event);
+                    }
+                }
             }
         }
     }

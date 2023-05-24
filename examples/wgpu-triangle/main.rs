@@ -184,11 +184,17 @@ impl WinHandler for WindowState {
     fn idle(&mut self, _: IdleToken) {}
 
     fn size(&mut self, _: Size) {
-        let inner = self.inner.as_mut().unwrap();
-        let size = surface_size(&inner.window);
-        inner.config.width = size.0;
-        inner.config.height = size.1;
-        inner.surface.configure(&inner.device, &inner.config);
+        if let Some(inner) = self.inner.as_mut() {
+            let size = surface_size(&inner.window);
+            inner.config.width = size.0;
+            inner.config.height = size.1;
+            inner.surface.configure(&inner.device, &inner.config);
+        }
+    }
+
+    fn key_down(&mut self, event: glazier::KeyEvent) -> bool {
+        println!("key down {event:?}");
+        true
     }
 
     fn request_close(&mut self) {

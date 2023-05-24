@@ -75,7 +75,7 @@ use crate::{Modifiers, PointerEvent};
 pub use surfaces::idle::Handle as IdleHandle;
 
 // holds references to the various components for a window implementation.
-struct Inner {
+pub(super) struct Inner {
     pub(super) id: u64,
 
     pub(super) connection: Connection,
@@ -327,7 +327,28 @@ impl WindowHandle {
         // XXX Update the new size right away.
         self.set_size(new_size);
 
+        if let Some(handler) = self.handler() {
+            handler.borrow_mut().size(new_size);
+        }
+
         new_size
+    }
+
+    /// Refresh the decorations frame if it's present returning whether the client should redraw.
+    pub fn refresh_frame(&self) -> bool {
+        if let Some(inner) = self.inner.borrow_mut().as_mut() {
+            if let Some(frame) = inner.frame.as_mut() {
+                let dirty = frame.is_dirty();
+                if dirty {
+                    frame.draw();
+                }
+                dirty
+            } else {
+                false
+            }
+        } else {
+            false
+        }
     }
 
     pub fn is_configured(&self) -> bool {
@@ -406,38 +427,45 @@ impl WindowHandle {
         position: Point,
         modifiers: Modifiers,
     ) {
-        let mut inner = self.inner.borrow_mut();
+        {
+            let mut inner = self.inner.borrow_mut();
+            if let Some(inner) = inner.as_mut() {
+                inner.pointers.push(added);
+                inner.reload_cursor_style();
+            }
+        }
 
-        if let Some(inner) = inner.as_mut() {
-            inner.pointers.push(added);
-            inner.reload_cursor_style();
-            inner.handler.borrow_mut().pointer_move(&PointerEvent {
+        if let Some(handler) = self.handler() {
+            handler.borrow_mut().pointer_move(&PointerEvent {
                 pos: position,
                 modifiers,
                 ..Default::default()
             });
         }
-
         // let mode = self.cursor_grab_mode.user_grab_mode;
         // let _ = self.set_cursor_grab_inner(mode);
     }
 
     /// Pointer has left the top-level.
     pub(super) fn pointer_left(&mut self, removed: Weak<ThemedPointer<GlazierPointerData>>) {
-        let mut inner = self.inner.borrow_mut();
-
-        if let Some(inner) = inner.as_mut() {
-            let mut new_pointers = Vec::new();
-            for pointer in inner.pointers.drain(..) {
-                if let Some(pointer) = pointer.upgrade() {
-                    if pointer.pointer() != removed.upgrade().unwrap().pointer() {
-                        new_pointers.push(Arc::downgrade(&pointer));
+        {
+            let mut inner = self.inner.borrow_mut();
+            if let Some(inner) = inner.as_mut() {
+                let mut new_pointers = Vec::new();
+                for pointer in inner.pointers.drain(..) {
+                    if let Some(pointer) = pointer.upgrade() {
+                        if pointer.pointer() != removed.upgrade().unwrap().pointer() {
+                            new_pointers.push(Arc::downgrade(&pointer));
+                        }
                     }
                 }
-            }
 
-            inner.pointers = new_pointers;
-            inner.handler.borrow_mut().pointer_leave();
+                inner.pointers = new_pointers;
+            }
+        }
+
+        if let Some(handler) = self.handler() {
+            handler.borrow_mut().pointer_leave();
         }
     }
 
@@ -449,8 +477,12 @@ impl WindowHandle {
         tracing::warn!("resizable is unimplemented on wayland");
     }
 
-    pub fn show_titlebar(&self, _show_titlebar: bool) {
-        tracing::warn!("show_titlebar is unimplemented on wayland");
+    pub fn show_titlebar(&self, show_titlebar: bool) {
+        if let Some(inner) = self.inner.borrow_mut().as_mut() {
+            if let Some(frame) = inner.frame.as_mut() {
+                frame.set_hidden(!show_titlebar);
+            }
+        }
     }
 
     pub fn set_position(&self, _position: Point) {
@@ -575,7 +607,9 @@ impl WindowHandle {
             }
         }
 
-        if needs_redraw {
+        let refresh_frame = self.refresh_frame();
+
+        if needs_redraw || refresh_frame {
             let mut handler = handler.as_ref().unwrap().borrow_mut();
             handler.paint(&crate::region::Region::EMPTY);
         }
@@ -649,8 +683,18 @@ impl WindowHandle {
     }
 
     pub fn set_cursor(&mut self, cursor: &Cursor) {
-        if let Some(inner) = self.inner.borrow().as_ref() {
-            inner.appdata.borrow().set_cursor(cursor);
+        if let Some(inner) = self.inner.borrow_mut().as_mut() {
+            let cursor = match cursor {
+                Cursor::Arrow => "default",
+                Cursor::IBeam => "text",
+                Cursor::Pointer => "pointer",
+                Cursor::Crosshair => "crosshair",
+                Cursor::NotAllowed => "not-allowed",
+                Cursor::ResizeLeftRight => "col-resize",
+                Cursor::ResizeUpDown => "row-resize",
+                _ => "default",
+            };
+            inner.set_cursor(cursor);
         }
     }
 
@@ -715,14 +759,18 @@ impl WindowHandle {
         }
     }
 
-    fn handler(&self) -> Rc<RefCell<Box<dyn WinHandler>>> {
-        self.inner.borrow().as_ref().unwrap().handler.clone()
+    pub(super) fn handler(&self) -> Option<Rc<RefCell<Box<dyn WinHandler>>>> {
+        self.inner
+            .borrow()
+            .as_ref()
+            .map(|inner| inner.handler.clone())
     }
 
     pub(super) fn run_idle(&self) {
-        let handler = self.handler();
-        let mut handler = handler.borrow_mut();
-        idle::run(&self.get_idle_handle().unwrap(), &mut **handler);
+        if let Some(handler) = self.handler() {
+            let mut handler = handler.borrow_mut();
+            idle::run(&self.get_idle_handle().unwrap(), &mut **handler);
+        }
     }
 
     pub(super) fn data(&self) -> Option<std::sync::Arc<Data>> {

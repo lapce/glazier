@@ -14,7 +14,7 @@
 
 //! A minimal wrapper around Xkb for our use.
 
-mod keycodes;
+pub mod keycodes;
 mod xkbcommon_sys;
 use crate::{
     backend::shared::{code_to_location, hardware_keycode_to_code},

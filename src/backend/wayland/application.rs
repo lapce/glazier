@@ -43,7 +43,7 @@ use smithay_client_toolkit::{
     delegate_subcompositor, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     reexports::{
-        calloop::{EventLoop, LoopHandle},
+        calloop::{ping::Ping, EventLoop, LoopHandle},
         client::{
             self, backend::ObjectId, globals::registry_queue_init, Connection, Proxy, QueueHandle,
         },
@@ -230,6 +230,9 @@ pub struct Data {
     // outputsqueue: RefCell<Option<calloop::channel::Channel<outputs::Event>>>,
     /// Loop handle to re-register event sources, such as keyboard repeat.
     pub loop_handle: LoopHandle<'static, Self>,
+
+    /// The event loop wakeup source.
+    pub event_loop_awakener: Ping,
 }
 
 impl Application {
@@ -353,6 +356,17 @@ impl Application {
         let event_loop = smithay_client_toolkit::reexports::calloop::EventLoop::<Data>::try_new()
             .map_err(|e| Error::string(e.to_string()))?;
 
+        // An event's loop awakener to wake up for window events from winit's windows.
+        let (event_loop_awakener, event_loop_awakener_source) =
+            smithay_client_toolkit::reexports::calloop::ping::make_ping()
+                .map_err(|e| Error::string(e.to_string()))?;
+        event_loop
+            .handle()
+            .insert_source(event_loop_awakener_source, move |_, _, _| {
+                // No extra handling is required, we just need to wake-up.
+            })
+            .map_err(|e| Error::string(e.to_string()))?;
+
         // We need to have keyboard events set up for our seats before the next roundtrip.
         let appdata = Rc::new(RefCell::new(Data {
             connection: conn,
@@ -388,6 +402,7 @@ impl Application {
             // outputsqueue: RefCell::new(Some(outputqueue)),
             // wayland: std::rc::Rc::new(env),
             loop_handle: event_loop.handle(),
+            event_loop_awakener,
         }));
 
         event_queue
@@ -541,7 +556,7 @@ impl Application {
 
             // handle.insert_idle(move |data| {
             for (_id, winhandle) in data.handles_iter() {
-                // winhandle.run_idle();
+                winhandle.run_idle();
                 winhandle.redraw();
             }
             // });
@@ -736,7 +751,7 @@ impl CompositorHandler for Data {
         surface: &client::protocol::wl_surface::WlSurface,
         new_factor: i32,
     ) {
-        todo!()
+        println!("scale factor changed {new_factor}");
     }
 
     fn frame(

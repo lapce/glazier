@@ -1,3 +1,7 @@
+use smithay_client_toolkit::reexports::calloop::ping::Ping;
+use smithay_client_toolkit::reexports::calloop::LoopHandle;
+
+use crate::backend::wayland::application::Data;
 use crate::common_util::IdleCallback;
 use crate::window;
 
@@ -22,6 +26,7 @@ impl std::fmt::Debug for Kind {
 #[derive(Clone)]
 pub struct Handle {
     pub(crate) queue: std::sync::Arc<std::sync::Mutex<Vec<Kind>>>,
+    pub(crate) event_loop_awakener: Ping,
 }
 
 impl Handle {
@@ -38,12 +43,14 @@ impl Handle {
         tracing::trace!("add_idle_callback initiated");
         let mut queue = self.queue.lock().unwrap();
         queue.push(Kind::Callback(Box::new(callback)));
+        self.event_loop_awakener.ping();
     }
 
     pub fn add_idle_token(&self, token: window::IdleToken) {
         tracing::trace!("add_idle_token initiated {:?}", token);
         let mut queue = self.queue.lock().unwrap();
         queue.push(Kind::Token(token));
+        self.event_loop_awakener.ping();
     }
 }
 

@@ -245,9 +245,10 @@ impl State {
     }
 
     fn get_logical_key(&mut self, scancode: u32) -> Key {
-        let mut key = keycodes::map_key(self.key_get_one_sym(scancode));
+        let keysym = self.key_get_one_sym(scancode);
+        let mut key = keycodes::map_key(keysym);
         if matches!(key, Key::Unidentified) {
-            if let Some(s) = self.key_get_utf8(scancode) {
+            if let Some(s) = self.key_sym_to_utf8(keysym) {
                 key = Key::Character(s);
             }
         }
@@ -256,6 +257,27 @@ impl State {
 
     fn key_get_one_sym(&mut self, scancode: u32) -> u32 {
         unsafe { xkb_state_key_get_one_sym(self.state, scancode) }
+    }
+
+    fn key_sym_to_utf8(&mut self, keysym: u32) -> Option<String> {
+        let mut buffer = Vec::new();
+        buffer.reserve(8);
+        loop {
+            let bytes_written =
+                unsafe { xkb_keysym_to_utf8(keysym, buffer.as_mut_ptr(), buffer.capacity()) };
+            if bytes_written == 0 {
+                return None;
+            } else if bytes_written == -1 {
+                buffer.reserve(8);
+            } else {
+                unsafe { buffer.set_len(bytes_written.try_into().unwrap()) };
+                break;
+            }
+        }
+
+        // Remove the null-terminator
+        buffer.pop();
+        Some(String::from_utf8(buffer).unwrap())
     }
 
     /// Get the string representation of a key.

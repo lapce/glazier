@@ -19,6 +19,9 @@ use std::sync::Arc;
 use std::{cell::RefCell, sync::Weak};
 
 use sctk_adwaita::AdwaitaFrame;
+use smithay_client_toolkit::reexports::calloop::ping::Ping;
+use smithay_client_toolkit::reexports::calloop::timer::{TimeoutAction, Timer};
+use smithay_client_toolkit::reexports::calloop::LoopHandle;
 use smithay_client_toolkit::seat::pointer::ThemedPointer;
 use smithay_client_toolkit::{
     compositor::{CompositorState, Region, SurfaceData},
@@ -44,22 +47,19 @@ use tracing;
 use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::protocol::wl_shm::WlShm;
 use wayland_client::Connection;
-use wayland_protocols::xdg_shell::client::xdg_popup;
-use wayland_protocols::xdg_shell::client::xdg_positioner;
-use wayland_protocols::xdg_shell::client::xdg_surface;
 
 use raw_window_handle::{
     HasRawDisplayHandle, HasRawWindowHandle, RawDisplayHandle, RawWindowHandle,
     WaylandDisplayHandle, WaylandWindowHandle,
 };
 
-use super::application::{self, Timer};
-use super::outputs::Position;
+use super::application::{self};
 use super::pointer::{GlazierPointerData, GlazierPointerDataExt};
 use super::surfaces::idle;
 use super::{application::Data, output::MonitorHandle};
 use super::{error::Error, menu::Menu, outputs, surfaces};
 
+use crate::backend::shared::linux::dialog;
 use crate::{
     dialog::FileDialogOptions,
     error::Error as ShellError,
@@ -138,6 +138,11 @@ pub(super) struct Inner {
     pub(super) appdata: Rc<RefCell<application::Data>>,
 
     idle_queue: std::sync::Arc<std::sync::Mutex<Vec<idle::Kind>>>,
+
+    pub(super) loop_handle: LoopHandle<'static, Data>,
+
+    /// The event loop wakeup source.
+    pub event_loop_awakener: Ping,
 }
 
 impl Inner {
@@ -265,7 +270,6 @@ impl WindowHandle {
                 && inner.frame.is_none()
                 && !inner.csd_fails
             {
-                println!("client decoration");
                 match AdwaitaFrame::new(
                     &inner.window,
                     shm,
@@ -274,7 +278,6 @@ impl WindowHandle {
                     sctk_adwaita::FrameConfig::auto(),
                 ) {
                     Ok(mut frame) => {
-                        println!("adwait frame");
                         frame.set_title(&inner.title);
                         // Ensure that the frame is not hidden.
                         frame.set_hidden(false);
@@ -432,6 +435,7 @@ impl WindowHandle {
             if let Some(inner) = inner.as_mut() {
                 inner.pointers.push(added);
                 inner.reload_cursor_style();
+                println!("pointer entered pointers len {}", inner.pointers.len());
             }
         }
 
@@ -461,6 +465,7 @@ impl WindowHandle {
                 }
 
                 inner.pointers = new_pointers;
+                println!("pointer left pointers len {}", inner.pointers.len());
             }
         }
 
@@ -598,11 +603,9 @@ impl WindowHandle {
 
     pub fn redraw(&self) {
         let mut needs_redraw = false;
-        let mut handler = None;
         if let Some(inner) = self.inner.borrow_mut().as_mut() {
             if inner.needs_redraw {
                 needs_redraw = true;
-                handler = Some(inner.handler.clone());
                 inner.needs_redraw = false;
             }
         }
@@ -610,8 +613,9 @@ impl WindowHandle {
         let refresh_frame = self.refresh_frame();
 
         if needs_redraw || refresh_frame {
-            let mut handler = handler.as_ref().unwrap().borrow_mut();
-            handler.paint(&crate::region::Region::EMPTY);
+            if let Some(handler) = self.handler() {
+                handler.borrow_mut().paint(&crate::region::Region::EMPTY);
+            }
         }
     }
 
@@ -647,52 +651,38 @@ impl WindowHandle {
     }
 
     pub fn request_timer(&self, deadline: std::time::Instant) -> TimerToken {
+        let token = TimerToken::next();
+
         let inner = self.inner.borrow();
         let inner = match inner.as_ref() {
             Some(i) => i,
             None => {
                 tracing::warn!("requested timer on a window that was destroyed");
-                return Timer::new(self.id(), deadline).token();
+                return token;
             }
         };
-        let appdata = inner.appdata.borrow();
 
-        let now = instant::Instant::now();
-        let mut timers = appdata.timers.borrow_mut();
-        let sooner = timers
-            .peek()
-            .map(|timer| deadline < timer.deadline())
-            .unwrap_or(true);
+        let handler = inner.handler.clone();
+        let timer = Timer::from_deadline(deadline);
+        let _ = inner.loop_handle.insert_source(timer, move |_, _, _| {
+            handler.borrow_mut().timer(token);
+            TimeoutAction::Drop
+        });
 
-        let timer = Timer::new(self.id(), deadline);
-        timers.push(timer);
-
-        // It is possible that the deadline has passed since it was set.
-        let timeout = if deadline < now {
-            std::time::Duration::ZERO
-        } else {
-            deadline - now
-        };
-
-        if sooner {
-            appdata.timer_handle.cancel_all_timeouts();
-            appdata.timer_handle.add_timeout(timeout, timer.token());
-        }
-
-        timer.token()
+        token
     }
 
     pub fn set_cursor(&mut self, cursor: &Cursor) {
         if let Some(inner) = self.inner.borrow_mut().as_mut() {
             let cursor = match cursor {
-                Cursor::Arrow => "default",
-                Cursor::IBeam => "text",
-                Cursor::Pointer => "pointer",
+                Cursor::Arrow => "left_ptr",
+                Cursor::IBeam => "xterm",
+                Cursor::Pointer => "hand2",
                 Cursor::Crosshair => "crosshair",
-                Cursor::NotAllowed => "not-allowed",
-                Cursor::ResizeLeftRight => "col-resize",
-                Cursor::ResizeUpDown => "row-resize",
-                _ => "default",
+                Cursor::NotAllowed => "allowed",
+                Cursor::ResizeLeftRight => "sb_h_double_arrow",
+                Cursor::ResizeUpDown => "sb_v_double_arrow",
+                _ => "left_ptr",
             };
             inner.set_cursor(cursor);
         }
@@ -703,14 +693,28 @@ impl WindowHandle {
         None
     }
 
-    pub fn open_file(&mut self, _options: FileDialogOptions) -> Option<FileDialogToken> {
-        tracing::warn!("unimplemented open_file");
-        None
+    pub fn open_file(&mut self, options: FileDialogOptions) -> Option<FileDialogToken> {
+        if let Some(idle) = self.get_idle_handle() {
+            let idle = crate::IdleHandle(crate::backend::window::IdleHandle::Wayland(idle));
+            let window = self.raw_window_handle();
+            let display = self.raw_display_handle();
+            Some(dialog::open_file(window, display, idle, options))
+        } else {
+            tracing::warn!("Couldn't open file because no idle handle available");
+            None
+        }
     }
 
-    pub fn save_as(&mut self, _options: FileDialogOptions) -> Option<FileDialogToken> {
-        tracing::warn!("unimplemented save_as");
-        None
+    pub fn save_as(&mut self, options: FileDialogOptions) -> Option<FileDialogToken> {
+        if let Some(idle) = self.get_idle_handle() {
+            let idle = crate::IdleHandle(crate::backend::window::IdleHandle::Wayland(idle));
+            let window = self.raw_window_handle();
+            let display = self.raw_display_handle();
+            Some(dialog::save_file(window, display, idle, options))
+        } else {
+            tracing::warn!("Couldn't save file because no idle handle available");
+            None
+        }
     }
 
     /// Get a handle that can be used to schedule an idle task.
@@ -718,6 +722,7 @@ impl WindowHandle {
         let inner = self.inner.borrow();
         inner.as_ref().map(|inner| idle::Handle {
             queue: inner.idle_queue.clone(),
+            event_loop_awakener: inner.event_loop_awakener.clone(),
         })
     }
 
@@ -979,6 +984,8 @@ impl WindowBuilder {
                 viewport: None,
                 appdata: self.app.data.clone(),
                 idle_queue: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
+                loop_handle: appdata.loop_handle.clone(),
+                event_loop_awakener: appdata.event_loop_awakener.clone(),
             }))),
         };
 

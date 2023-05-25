@@ -611,6 +611,7 @@ impl Keyboard {
             }
             wl_keyboard::Event::Modifiers { .. } => {
                 self.xkb_mods.replace(event_to_mods(event));
+                println!("modifiers {:?}", self.xkb_mods);
             }
             wl_keyboard::Event::RepeatInfo { rate, delay } => {
                 tracing::trace!("keyboard repeat info received {:?} {:?}", rate, delay);

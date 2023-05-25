@@ -192,9 +192,9 @@ impl PointerHandler for Data {
                     let has_discrete_scroll = horizontal.discrete != 0 || vertical.discrete != 0;
 
                     let delta = if has_discrete_scroll {
-                        Vec2::new(-horizontal.discrete as f64, -vertical.discrete as f64)
+                        Vec2::new(horizontal.discrete as f64, vertical.discrete as f64)
                     } else {
-                        Vec2::new(-horizontal.absolute, -vertical.absolute)
+                        Vec2::new(horizontal.absolute, vertical.absolute)
                     };
 
                     let event = PointerEvent {

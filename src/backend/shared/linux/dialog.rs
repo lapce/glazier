@@ -55,7 +55,8 @@ fn dialog(
                 let mut request = file_chooser::SelectedFiles::open_file()
                     .title(title)
                     .identifier(Some(id))
-                    .modal(Some(true));
+                    .modal(Some(true))
+                    .directory(options.select_directories);
                 if let Some(label) = &options.button_text {
                     request = request.accept_label(Some(label.as_str()));
                 }

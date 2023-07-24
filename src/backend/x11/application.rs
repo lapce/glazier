@@ -25,6 +25,7 @@ use anyhow::{anyhow, Context, Error};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::render::{self, ConnectionExt as _, Pictformat};
 use x11rb::protocol::xinput::ChangeReason;
+use x11rb::protocol::xkb::{EventType, MapPart, SelectEventsAux};
 use x11rb::protocol::xproto::{
     self, ConnectionExt as _, CreateWindowAux, EventMask, Timestamp, Visualtype, WindowClass,
 };
@@ -184,7 +185,7 @@ pub(crate) struct AppInner {
     /// The clipboard implementation
     clipboard: Clipboard,
     /// The clipboard implementation for the primary selection
-    primary: Clipboard,
+    pub(crate) primary: Clipboard,
     /// The X11 window id of this `Application`.
     ///
     /// This is an input-only non-visual X11 window that is created first during initialization,
@@ -227,6 +228,9 @@ pub(crate) struct Cursors {
     pub col_resize: Option<xproto::Cursor>,
 }
 
+#[derive(Clone)]
+pub(crate) struct AppHandle;
+
 impl Application {
     pub fn new() -> Result<Application, Error> {
         let inner = AppInner::new()?;
@@ -266,6 +270,10 @@ impl Application {
     pub fn get_locale() -> String {
         linux::env::locale()
     }
+
+    pub fn get_handle(&self) -> Option<AppHandle> {
+        None
+    }
 }
 
 impl AppInner {
@@ -292,10 +300,22 @@ impl AppInner {
             .context("get core keyboard device id")?;
 
         let keymap = xkb_context
-            .keymap_from_device(&connection, device_id)
+            .keymap_from_device(&connection, &device_id)
             .context("key map from device")?;
 
-        let xkb_state = keymap.state();
+        connection
+            .xkb_select_events(
+                device_id.0 as u16,
+                EventType::default(),
+                EventType::STATE_NOTIFY,
+                MapPart::default(),
+                MapPart::default(),
+                &SelectEventsAux::default(),
+            )
+            .context("Subscribing to State notify events")?;
+        let xkb_state = xkb_context
+            .state_from_x11_keymap(&keymap, &connection, &device_id)
+            .context("State from keymap and device")?;
         let window_id = AppInner::create_event_window(&connection, screen_num)?;
         let state = RefCell::new(State {
             quitting: false,
@@ -571,6 +591,17 @@ impl AppInner {
 
                 w.handle_key_event(key_event);
             }
+            Event::XkbStateNotify(ev) => {
+                let mut state = borrow_mut!(self.state)?;
+                state.xkb_state.update_xkb_state(xkb::ActiveModifiers {
+                    base_mods: ev.base_mods.into(),
+                    latched_mods: ev.latched_mods.into(),
+                    locked_mods: ev.locked_mods.into(),
+                    base_layout: ev.base_group as u32,
+                    latched_layout: ev.latched_group as u32,
+                    locked_layout: ev.locked_group.into(),
+                });
+            }
             Event::KeyRelease(ev) => {
                 let w = self
                     .window(ev.event)
@@ -835,9 +866,12 @@ impl AppInner {
     }
 }
 
-impl crate::platform::linux::ApplicationExt for crate::Application {
-    fn primary_clipboard(&self) -> crate::Clipboard {
-        self.backend_app.inner.primary.clone().into()
+impl AppHandle {
+    pub fn run_on_main<F>(&self, _callback: F)
+    where
+        F: FnOnce(Option<&mut dyn AppHandler>) + Send + 'static,
+    {
+        todo!()
     }
 }
 

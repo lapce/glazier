@@ -274,7 +274,7 @@ impl WindowBuilder {
             WindowLevel::Tooltip(parent)
             | WindowLevel::DropDown(parent)
             | WindowLevel::Modal(parent) => {
-                let handle = parent.0.window.clone();
+                let handle = parent.0.unwrap_x11().window.clone();
                 let origin = handle
                     .upgrade()
                     .map(|x| x.get_position())
@@ -757,7 +757,7 @@ impl Window {
             Cursor::NotAllowed => cursors.not_allowed,
             Cursor::ResizeLeftRight => cursors.col_resize,
             Cursor::ResizeUpDown => cursors.row_resize,
-            Cursor::Custom(custom) => Some(custom.0),
+            Cursor::Custom(custom) => Some(custom.unwrap_x11().0),
         };
         if cursor.is_none() {
             warn!("Unable to load cursor {:?}", cursor);
@@ -1034,7 +1034,7 @@ impl Window {
             for callback in queue {
                 match callback {
                     IdleKind::Callback(f) => {
-                        f.call(handler);
+                        f(handler);
                     }
                     IdleKind::Token(tok) => {
                         handler.idle(tok);
@@ -1144,7 +1144,7 @@ pub struct IdleHandle {
 }
 
 pub(crate) enum IdleKind {
-    Callback(Box<dyn IdleCallback>),
+    Callback(IdleCallback),
     Token(IdleToken),
     Redraw,
 }

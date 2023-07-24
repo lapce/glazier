@@ -207,7 +207,7 @@ pub struct IdleHandle {
 
 /// This represents different Idle Callback Mechanism
 enum IdleKind {
-    Callback(Box<dyn IdleCallback>),
+    Callback(IdleCallback),
     Token(IdleToken),
 }
 
@@ -790,7 +790,7 @@ impl WndProc for MyWndProc {
                             // When maximized, windows still adds offsets for the frame
                             // so we counteract them here.
                             let s: *mut NCCALCSIZE_PARAMS = lparam as *mut NCCALCSIZE_PARAMS;
-                            if let Some(mut s) = s.as_mut() {
+                            if let Some(s) = s.as_mut() {
                                 let border = self.get_system_metric(SM_CXPADDEDBORDER);
                                 let frame = self.get_system_metric(SM_CYSIZEFRAME);
                                 s.rgrc[0].top += border + frame;
@@ -1159,7 +1159,7 @@ impl WndProc for MyWndProc {
                     let queue = self.handle.borrow().take_idle_queue();
                     for callback in queue {
                         match callback {
-                            IdleKind::Callback(it) => it.call(&mut *s.handler),
+                            IdleKind::Callback(it) => it(&mut *s.handler),
                             IdleKind::Token(token) => s.handler.idle(token),
                         }
                     }

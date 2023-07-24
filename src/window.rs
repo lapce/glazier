@@ -171,8 +171,18 @@ pub enum WindowState {
 }
 
 /// A handle to a platform window object.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct WindowHandle(pub(crate) backend::WindowHandle);
+
+impl Default for WindowHandle {
+    /// Create a default `WindowHandle`
+    ///
+    /// This is invalid to use, and operations using this handle
+    /// may panic or do nothing
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
 
 impl WindowHandle {
     /// Make this window visible.
@@ -208,7 +218,7 @@ impl WindowHandle {
     /// because this refers to the current location of the mouse, you should probably call this
     /// function in response to every relevant [`WinHandler::mouse_move`].
     ///
-    /// This is currently only implemented on Windows and GTK.
+    /// This is currently only implemented on Windows
     pub fn handle_titlebar(&self, val: bool) {
         self.0.handle_titlebar(val);
     }
@@ -247,8 +257,7 @@ impl WindowHandle {
     ///
     /// The details of this function are somewhat platform-dependent. For example, on Windows both
     /// the insets and the window size include the space taken up by the title bar and window
-    /// decorations; on GTK neither the insets nor the window size include the title bar or window
-    /// decorations.
+    /// decorations
     ///
     /// [display points]: crate::Scale
     pub fn content_insets(&self) -> Insets {
@@ -794,5 +803,5 @@ mod test {
     use static_assertions as sa;
 
     sa::assert_not_impl_any!(WindowHandle: Send, Sync);
-    sa::assert_impl_all!(IdleHandle: Send, Sync);
+    sa::assert_impl_all!(IdleHandle: Send);
 }

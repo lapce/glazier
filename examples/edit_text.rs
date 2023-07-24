@@ -1,18 +1,19 @@
 use glazier::kurbo::Size;
 use glazier::{
-    keyboard_types::Key,
     text::{
         Action, Affinity, Direction, Event, HitTestPoint, InputHandler, Movement, Selection,
         VerticalMovement,
     },
     Application, KeyEvent, Region, Scalable, TextFieldToken, WinHandler, WindowHandle,
 };
+use glazier::{HotKey, SysMods};
 use parley::{FontContext, Layout};
 use std::any::Any;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
+use tracing_subscriber::EnvFilter;
 use unicode_segmentation::GraphemeCursor;
 use vello::util::{RenderContext, RenderSurface};
 use vello::Renderer;
@@ -33,6 +34,9 @@ const TEXT_X: f64 = 100.0;
 const TEXT_Y: f64 = 100.0;
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
     let app = Application::new().unwrap();
     let window = glazier::WindowBuilder::new(app.clone())
         .resizable(true)
@@ -44,6 +48,28 @@ fn main() {
     app.run(None);
 }
 
+struct HotKeys {
+    copy: HotKey,
+    paste: HotKey,
+    select_all: HotKey,
+}
+
+impl HotKeys {
+    fn new() -> Self {
+        HotKeys {
+            copy: HotKey::new(SysMods::Cmd, "c"),
+            paste: HotKey::new(SysMods::Cmd, "v"),
+            select_all: HotKey::new(SysMods::Cmd, "a"),
+        }
+    }
+}
+
+impl Default for HotKeys {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 struct WindowState {
     handle: WindowHandle,
     render: RenderContext,
@@ -53,6 +79,7 @@ struct WindowState {
     size: Size,
     document: Rc<RefCell<DocumentState>>,
     text_input_token: Option<TextFieldToken>,
+    hotkeys: HotKeys,
 }
 
 struct DocumentState {
@@ -111,6 +138,7 @@ impl WindowState {
             scene: Default::default(),
             size: Size::new(800.0, 600.0),
             text_input_token: None,
+            hotkeys: Default::default(),
         }
     }
 
@@ -153,6 +181,7 @@ impl WindowState {
                 .render_to_surface(device, queue, &self.scene, &surface_texture, width, height)
                 .unwrap();
             surface_texture.present();
+            device.poll(wgpu::Maintain::Poll);
         }
     }
 
@@ -192,6 +221,37 @@ impl WindowState {
             None,
             &rect,
         );
+        if let Some(composition) = &doc.composition {
+            let composition_start = parley::layout::Cursor::from_position(
+                &doc.layout,
+                composition.start,
+                true,
+            )
+            .offset() as f64
+                + TEXT_X;
+            let composition_end =
+                parley::layout::Cursor::from_position(&doc.layout, composition.end, true).offset()
+                    as f64
+                    + TEXT_X;
+            let rect = Rect::from_points(
+                Point::new(
+                    composition_start.min(composition_end - 1.0),
+                    TEXT_Y + FONT_SIZE as f64 + 2.0,
+                ),
+                Point::new(
+                    composition_start.max(composition_end + 1.0),
+                    TEXT_Y + FONT_SIZE as f64,
+                ),
+            );
+            sb.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                &Brush::Solid(Color::rgba8(0, 0, 255, 100)),
+                None,
+                &rect,
+            );
+        }
+
         sb.pop_layer();
     }
 }
@@ -242,13 +302,43 @@ impl WinHandler for WindowState {
     }
 
     fn key_down(&mut self, event: KeyEvent) -> bool {
-        if event.key == Key::Character("c".to_string()) {
-            // custom hotkey for pressing "c"
-            println!("user pressed c! wow! setting selection to 0");
+        self.schedule_render();
+        if self.hotkeys.copy.matches(&event) {
+            let doc = self.document.borrow_mut();
+            let text = &doc.text[doc.selection.range()];
+            Application::global().clipboard().put_string(text); // return true prevents the keypress event from being handled as text input
 
-            // update internal selection state
-            self.document.borrow_mut().selection = Selection::caret(0);
+            return true;
+        }
+        if self.hotkeys.paste.matches(&event) {
+            println!("Pasting");
+            let clipboard_contents = Application::global().clipboard().get_string();
+            if let Some(mut contents) = clipboard_contents {
+                contents.retain(|c| c != '\n');
+                {
+                    let mut doc = self.document.borrow_mut();
+                    let selection = doc.selection;
+                    doc.text.replace_range(selection.range(), &contents);
+                    let new_caret_index = selection.min() + contents.len();
+                    doc.selection = Selection::caret(new_caret_index);
+                    doc.refresh_layout();
+                    doc.composition = None;
+                }
+                // notify the OS that we've updated the selection
+                self.handle
+                    .update_text_field(self.text_input_token.unwrap(), Event::Reset);
 
+                // repaint window
+                self.handle.request_anim_frame();
+            }
+
+            return true;
+        }
+        if self.hotkeys.select_all.matches(&event) {
+            {
+                let mut doc = self.document.borrow_mut();
+                doc.selection = Selection::new(0, doc.text.len());
+            }
             // notify the OS that we've updated the selection
             self.handle
                 .update_text_field(self.text_input_token.unwrap(), Event::SelectionChanged);

@@ -281,8 +281,7 @@ extern "C" fn run_on_main_queue(this: &mut Object, _: Sel) {
 
 extern "C" fn will_terminate(this: &mut Object, _: Sel, _item: id) {
     unsafe {
-        let inner: *mut c_void = *this.get_ivar(APP_HANDLER_IVAR);
-        let inner = &mut *(inner as *mut DelegateState);
-        (*inner).will_terminate();
+        let state = DelegateState::from_delegate(this);
+        state.will_terminate();
     }
 }

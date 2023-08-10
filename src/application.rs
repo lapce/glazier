@@ -43,6 +43,10 @@ pub trait AppHandler {
 
     /// Called before the application is quit
     fn will_terminate(&mut self) {}
+
+    /// Called when you click the app in the doc on macOS
+    #[allow(unused_variables)]
+    fn should_handle_reopen(&mut self, has_visible_windows: bool) {}
 }
 
 /// The top level application object.

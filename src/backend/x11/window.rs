@@ -51,7 +51,7 @@ use crate::backend::shared::Timer;
 use crate::common_util::IdleCallback;
 use crate::dialog::FileDialogOptions;
 use crate::error::Error as ShellError;
-use crate::keyboard::{KeyState, Modifiers};
+use crate::keyboard::{KeyState, Modifiers, ModifiersExt};
 use crate::kurbo::{Insets, Point, Rect, Size, Vec2};
 use crate::mouse::{Cursor, CursorDesc};
 use crate::region::Region;
@@ -210,25 +210,26 @@ impl WindowBuilder {
         let id = conn.generate_id()?;
         let setup = conn.setup();
 
-        let env_dpi = std::env::var("DRUID_X11_DPI")
+        let scale_override = std::env::var("GLAZIER_OVERRIDE_SCALE")
             .ok()
             .map(|x| x.parse::<f64>());
 
-        let scale = match env_dpi.or_else(|| self.app.rdb.get_value("Xft.dpi", "").transpose()) {
-            Some(Ok(dpi)) => {
-                let scale = dpi / 96.;
-                Scale::new(scale, scale)
-            }
-            None => Scale::default(),
-            Some(Err(err)) => {
-                let default = Scale::default();
-                warn!(
-                    "Unable to parse dpi: {:?}, defaulting to {:?}",
-                    err, default
-                );
-                default
-            }
-        };
+        let scale =
+            match scale_override.or_else(|| self.app.rdb.get_value("Xft.dpi", "").transpose()) {
+                Some(Ok(dpi)) => {
+                    let scale = dpi / 96.;
+                    Scale::new(scale, scale)
+                }
+                None => Scale::default(),
+                Some(Err(err)) => {
+                    let default = Scale::default();
+                    warn!(
+                        "Unable to parse dpi: {:?}, defaulting to {:?}",
+                        err, default
+                    );
+                    default
+                }
+            };
 
         let size_px = self.size.to_px(scale);
         let screen = setup
@@ -841,7 +842,7 @@ impl Window {
             pressure: 0.0,
         });
         let button = if is_primary {
-            PointerButton::Left
+            PointerButton::Primary
         } else {
             PointerButton::None
         };
@@ -925,7 +926,7 @@ impl Window {
         pointer_ev.buttons = pointer_ev.buttons.with(pointer_ev.button);
         // TODO: detect the count
         pointer_ev.count = 1;
-        self.with_handler(|h| h.pointer_down(&pointer_ev));
+        self.with_handler(|h| h.pointer_down(pointer_ev));
         Ok(())
     }
 
@@ -934,27 +935,27 @@ impl Window {
         // The xcb state includes the newly released button, but druid
         // doesn't want it.
         pointer_ev.buttons = pointer_ev.buttons.without(pointer_ev.button);
-        self.with_handler(|h| h.pointer_up(&pointer_ev));
+        self.with_handler(|h| h.pointer_up(pointer_ev));
         Ok(())
     }
 
     pub fn handle_touch_begin(&self, ev: &xinput::TouchBeginEvent) -> Result<(), Error> {
         let mut pointer_ev = self.pointer_touch_event(ev);
         pointer_ev.buttons = pointer_ev.buttons.with(pointer_ev.button);
-        self.with_handler(|h| h.pointer_down(&pointer_ev));
+        self.with_handler(|h| h.pointer_down(pointer_ev));
         Ok(())
     }
 
     pub fn handle_touch_update(&self, ev: &xinput::TouchBeginEvent) -> Result<(), Error> {
         let pointer_ev = self.pointer_touch_event(ev);
-        self.with_handler(|h| h.pointer_move(&pointer_ev));
+        self.with_handler(|h| h.pointer_move(pointer_ev));
         Ok(())
     }
 
     pub fn handle_touch_end(&self, ev: &xinput::TouchBeginEvent) -> Result<(), Error> {
         let mut pointer_ev = self.pointer_touch_event(ev);
         pointer_ev.buttons = pointer_ev.buttons.without(pointer_ev.button);
-        self.with_handler(|h| h.pointer_move(&pointer_ev));
+        self.with_handler(|h| h.pointer_move(pointer_ev));
         Ok(())
     }
 
@@ -977,14 +978,14 @@ impl Window {
         });
         pointer_ev.button = PointerButton::None;
 
-        self.with_handler(|h| h.wheel(&pointer_ev));
+        self.with_handler(|h| h.wheel(pointer_ev));
         Ok(())
     }
 
     pub fn handle_motion_notify(&self, ev: &xinput::ButtonPressEvent) -> Result<(), Error> {
         let mut pointer_ev = self.pointer_event(ev);
         pointer_ev.button = PointerButton::None;
-        self.with_handler(|h| h.pointer_move(&pointer_ev));
+        self.with_handler(|h| h.pointer_move(pointer_ev));
         Ok(())
     }
 
@@ -1077,9 +1078,9 @@ impl Window {
 fn pointer_button(button: u32) -> PointerButton {
     match button {
         0 => PointerButton::None,
-        1 => PointerButton::Left,
-        2 => PointerButton::Middle,
-        3 => PointerButton::Right,
+        1 => PointerButton::Primary,
+        2 => PointerButton::Auxiliary,
+        3 => PointerButton::Secondary,
         // buttons 4 through 7 are for scrolling.
         4..=7 => PointerButton::None,
         8 => PointerButton::X1,
@@ -1096,9 +1097,9 @@ fn pointer_button(button: u32) -> PointerButton {
 fn pointer_buttons(mods: KeyButMask) -> PointerButtons {
     let mut buttons = PointerButtons::new();
     let button_masks = &[
-        (xproto::ButtonMask::M1, PointerButton::Left),
-        (xproto::ButtonMask::M2, PointerButton::Middle),
-        (xproto::ButtonMask::M3, PointerButton::Right),
+        (xproto::ButtonMask::M1, PointerButton::Primary),
+        (xproto::ButtonMask::M2, PointerButton::Auxiliary),
+        (xproto::ButtonMask::M3, PointerButton::Secondary),
         // TODO: determine the X1/X2 state, using our own caching if necessary.
         // BUTTON_MASK_4/5 do not work: they are for scroll events.
     ];

@@ -118,7 +118,7 @@ impl PenInclination {
         let deg_to_rad = PI / 180.0;
 
         // Tilts are not capable of representing angles close to the horizon, so avoid numerical
-        // issues by thresholding the altidue away from the horizon.
+        // issues by thresholding the altitude away from the horizon.
         let altitude_angle = self.altitude.to_radians().max(0.5 * deg_to_rad);
 
         let tan_alt = altitude_angle.tan();
@@ -212,67 +212,44 @@ pub enum PointerButton {
     /// No mouse button.
     // MUST BE FIRST (== 0)
     None,
-    /// Left mouse button, Left Mouse, Touch Contact, Pen contact.
-    Left,
-    /// Right mouse button, Right Mouse, Pen barrel button.
-    Right,
-    /// Middle mouse button.
-    Middle,
+    /// Primary button, commonly the left mouse button, touch contact, pen contact.
+    Primary,
+    /// Secondary button, commonly the right mouse button, pen barrel button.
+    Secondary,
+    /// Auxiliary button, commonly the middle mouse button.
+    Auxiliary,
     /// X1 (back) Mouse.
     X1,
     /// X2 (forward) Mouse.
     X2,
 }
 
-impl From<crate::MouseButton> for PointerButton {
-    fn from(m: crate::MouseButton) -> Self {
-        match m {
-            crate::MouseButton::None => PointerButton::None,
-            crate::MouseButton::Left => PointerButton::Left,
-            crate::MouseButton::Right => PointerButton::Right,
-            crate::MouseButton::Middle => PointerButton::Middle,
-            crate::MouseButton::X1 => PointerButton::X1,
-            crate::MouseButton::X2 => PointerButton::X2,
-        }
-    }
-}
-
 impl PointerButton {
-    /// Returns `true` if this is [`PointerButton::Left`].
-    ///
-    /// [`MouseButton::Left`]: #variant.Left
+    /// Returns `true` if this is [`PointerButton::Primary`].
     #[inline]
-    pub fn is_left(self) -> bool {
-        self == PointerButton::Left
+    pub fn is_primary(self) -> bool {
+        self == PointerButton::Primary
     }
 
-    /// Returns `true` if this is [`PointerButton::Right`].
-    ///
-    /// [`PointerButton::Right`]: #variant.Right
+    /// Returns `true` if this is [`PointerButton::Secondary`].
     #[inline]
-    pub fn is_right(self) -> bool {
-        self == PointerButton::Right
+    pub fn is_secondary(self) -> bool {
+        self == PointerButton::Secondary
     }
 
-    /// Returns `true` if this is [`PointerButton::Middle`].
-    ///
-    /// [`PointerButton::Middle`]: #variant.Middle
+    /// Returns `true` if this is [`PointerButton::Auxiliary`].
     #[inline]
-    pub fn is_middle(self) -> bool {
-        self == PointerButton::Middle
+    pub fn is_auxiliary(self) -> bool {
+        self == PointerButton::Auxiliary
     }
 
     /// Returns `true` if this is [`PointerButton::X1`].
-    ///
-    /// [`PointerButton::X1`]: #variant.X1
     #[inline]
     pub fn is_x1(self) -> bool {
         self == PointerButton::X1
     }
 
     /// Returns `true` if this is [`PointerButton::X2`].
-    ///
-    /// [`PointerButton::X2`]: #variant.X2
     #[inline]
     pub fn is_x2(self) -> bool {
         self == PointerButton::X2
@@ -280,17 +257,15 @@ impl PointerButton {
 }
 
 /// A set of [`PointerButton`]s.
-///
-/// [`PointerButton`]: enum.PointerButton.html
 #[derive(PartialEq, Eq, Clone, Copy, Default)]
 pub struct PointerButtons(u8);
 
 fn button_bit(button: PointerButton) -> u8 {
     match button {
         PointerButton::None => 0,
-        PointerButton::Left => 0b1,
-        PointerButton::Right => 0b10,
-        PointerButton::Middle => 0b100,
+        PointerButton::Primary => 0b1,
+        PointerButton::Secondary => 0b10,
+        PointerButton::Auxiliary => 0b100,
         PointerButton::X1 => 0b1000,
         PointerButton::X2 => 0b10000,
     }
@@ -347,41 +322,31 @@ impl PointerButtons {
         self.0 & buttons.0 == buttons.0
     }
 
-    /// Returns `true` if [`PointerButton::Left`] is in the set.
-    ///
-    /// [`PointerButton::Left`]: enum.PointerButton.html#variant.Left
+    /// Returns `true` if [`PointerButton::Primary`] is in the set.
     #[inline]
-    pub fn has_left(self) -> bool {
-        self.contains(PointerButton::Left)
+    pub fn has_primary(self) -> bool {
+        self.contains(PointerButton::Primary)
     }
 
-    /// Returns `true` if [`PointerButton::Right`] is in the set.
-    ///
-    /// [`PointerButton::Right`]: enum.PointerButton.html#variant.Right
+    /// Returns `true` if [`PointerButton::Secondary`] is in the set.
     #[inline]
-    pub fn has_right(self) -> bool {
-        self.contains(PointerButton::Right)
+    pub fn has_secondary(self) -> bool {
+        self.contains(PointerButton::Secondary)
     }
 
-    /// Returns `true` if [`PointerButton::Middle`] is in the set.
-    ///
-    /// [`PointerButton::Middle`]: enum.PointerButton.html#variant.Middle
+    /// Returns `true` if [`PointerButton::Auxiliary`] is in the set.
     #[inline]
-    pub fn has_middle(self) -> bool {
-        self.contains(PointerButton::Middle)
+    pub fn has_auxiliary(self) -> bool {
+        self.contains(PointerButton::Auxiliary)
     }
 
     /// Returns `true` if [`PointerButton::X1`] is in the set.
-    ///
-    /// [`PointerButton::X1`]: enum.PointerButton.html#variant.X1
     #[inline]
     pub fn has_x1(self) -> bool {
         self.contains(PointerButton::X1)
     }
 
     /// Returns `true` if [`PointerButton::X2`] is in the set.
-    ///
-    /// [`PointerButton::X2`]: enum.PointerButton.html#variant.X2
     #[inline]
     pub fn has_x2(self) -> bool {
         self.contains(PointerButton::X2)
@@ -412,15 +377,9 @@ impl PointerButtons {
     }
 }
 
-impl From<crate::MouseButtons> for PointerButtons {
-    fn from(m: crate::MouseButtons) -> Self {
-        PointerButtons(m.0)
-    }
-}
-
 impl std::fmt::Debug for PointerButtons {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "PointerButtons({:05b})", self.0 >> 1)
+        write!(f, "PointerButtons({:05b})", self.0)
     }
 }
 
@@ -443,7 +402,7 @@ pub struct PointerEvent {
     pub button: PointerButton,
 
     /// Focus is `true` on macOS when the mouse-down event (or its companion mouse-up event)
-    /// with `MouseButton::Left` was the event that caused the window to gain focus.
+    /// with `PointerButton::Primary` was the event that caused the window to gain focus.
     pub focus: bool,
 
     // TODO: Should this be here, or only in mouse/pen events?
@@ -466,24 +425,6 @@ impl Default for PointerEvent {
             pointer_type: PointerType::Mouse(MouseInfo {
                 wheel_delta: Vec2::ZERO,
             }),
-        }
-    }
-}
-
-impl From<crate::MouseEvent> for PointerEvent {
-    fn from(m: crate::MouseEvent) -> Self {
-        Self {
-            pointer_id: PointerId(0),
-            is_primary: true,
-            pointer_type: PointerType::Mouse(MouseInfo {
-                wheel_delta: m.wheel_delta,
-            }),
-            pos: m.pos,
-            buttons: m.buttons.into(),
-            modifiers: m.mods,
-            button: m.button.into(),
-            focus: m.focus,
-            count: m.count,
         }
     }
 }

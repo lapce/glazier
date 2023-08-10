@@ -15,6 +15,7 @@
 //! Platform independent window types.
 
 use std::any::Any;
+use std::fmt;
 use std::time::Duration;
 
 use crate::application::Application;
@@ -25,7 +26,7 @@ use crate::error::Error;
 use crate::keyboard::KeyEvent;
 use crate::kurbo::{Insets, Point, Rect, Size};
 use crate::menu::Menu;
-use crate::mouse::{Cursor, CursorDesc, MouseEvent};
+use crate::mouse::{Cursor, CursorDesc};
 use crate::region::Region;
 use crate::scale::Scale;
 use crate::text::{Event, InputHandler};
@@ -104,7 +105,7 @@ impl IdleHandle {
         self.0.add_idle_callback(callback)
     }
 
-    /// Request a callback from the runloop. Your `WinHander::idle` method will
+    /// Request a callback from the runloop. Your [`WinHandler::idle`] method will
     /// be called with the `token` that was passed in.
     pub fn schedule_idle(&mut self, token: IdleToken) {
         self.0.add_idle_token(token)
@@ -162,6 +163,17 @@ pub enum WindowLevel {
     Modal(WindowHandle),
 }
 
+impl fmt::Debug for WindowLevel {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            WindowLevel::AppWindow => write!(f, "AppWindow"),
+            WindowLevel::Tooltip(_) => write!(f, "Tooltip"),
+            WindowLevel::DropDown(_) => write!(f, "DropDown"),
+            WindowLevel::Modal(_) => write!(f, "Modal"),
+        }
+    }
+}
+
 /// Contains the different states a Window can be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowState {
@@ -216,7 +228,7 @@ impl WindowHandle {
     /// Informs the system that the current location of the mouse should be treated as part of the
     /// window's titlebar. This can be used to implement a custom titlebar widget. Note that
     /// because this refers to the current location of the mouse, you should probably call this
-    /// function in response to every relevant [`WinHandler::mouse_move`].
+    /// function in response to every relevant [`WinHandler::pointer_move`].
     ///
     /// This is currently only implemented on Windows
     pub fn handle_titlebar(&self, val: bool) {
@@ -649,8 +661,8 @@ pub trait WinHandler {
         false
     }
 
-    /// Called when a key is released. This corresponds to the WM_KEYUP message
-    /// on Windows, or keyUp(withEvent:) on macOS.
+    /// Called when a key is released. This corresponds to the `WM_KEYUP` message
+    /// on Windows, or `keyUp(withEvent:)` on macOS.
     #[allow(unused_variables)]
     fn key_up(&mut self, event: KeyEvent) {}
 
@@ -688,34 +700,6 @@ pub trait WinHandler {
     #[allow(unused_variables)]
     fn zoom(&mut self, delta: f64) {}
 
-    // While the backends transition from mouse events to pointer events, we keep these compatibility
-    // shims.
-
-    #[doc(hidden)]
-    fn mouse_wheel(&mut self, event: &MouseEvent) {
-        self.wheel(&event.clone().into())
-    }
-
-    #[doc(hidden)]
-    fn mouse_move(&mut self, event: &MouseEvent) {
-        self.pointer_move(&event.clone().into())
-    }
-
-    #[doc(hidden)]
-    fn mouse_down(&mut self, event: &MouseEvent) {
-        self.pointer_down(&event.clone().into())
-    }
-
-    #[doc(hidden)]
-    fn mouse_up(&mut self, event: &MouseEvent) {
-        self.pointer_up(&event.clone().into())
-    }
-
-    #[doc(hidden)]
-    fn mouse_leave(&mut self) {
-        self.pointer_leave()
-    }
-
     /// Called on a mouse wheel event.
     ///
     /// The polarity is the amount to be added to the scroll position,
@@ -725,23 +709,23 @@ pub trait WinHandler {
     ///
     /// [WheelEvent]: https://w3c.github.io/uievents/#event-type-wheel
     #[allow(unused_variables)]
-    fn wheel(&mut self, event: &PointerEvent) {}
+    fn wheel(&mut self, event: PointerEvent) {}
 
     /// Called when a pointer moves.
     #[allow(unused_variables)]
-    fn pointer_move(&mut self, event: &PointerEvent) {}
+    fn pointer_move(&mut self, event: PointerEvent) {}
 
     /// Called when a pointer goes "down."
     ///
     /// This includes things like mouse button presses, and styli coming in contact with screens.
     #[allow(unused_variables)]
-    fn pointer_down(&mut self, event: &PointerEvent) {}
+    fn pointer_down(&mut self, event: PointerEvent) {}
 
     /// Called when a pointer goes "up."
     ///
     /// This includes things like mouse button releases, and styli lifting from screens.
     #[allow(unused_variables)]
-    fn pointer_up(&mut self, event: &PointerEvent) {}
+    fn pointer_up(&mut self, event: PointerEvent) {}
 
     /// Called when a pointer has left the application window.
     fn pointer_leave(&mut self) {}
@@ -771,8 +755,8 @@ pub trait WinHandler {
     fn request_close(&mut self) {}
 
     /// Called when the window is being destroyed. Note that this happens
-    /// earlier in the sequence than drop (at WM_DESTROY, while the latter is
-    /// WM_NCDESTROY).
+    /// earlier in the sequence than drop (at `WM_DESTROY`, while the latter is
+    /// `WM_NCDESTROY`).
     #[allow(unused_variables)]
     fn destroy(&mut self) {}
 

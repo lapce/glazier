@@ -1,23 +1,20 @@
+use std::any::Any;
+use std::collections::HashMap;
+use std::f64::consts::PI;
+
+use kurbo::Ellipse;
+use vello::util::{RenderContext, RenderSurface};
+use vello::Renderer;
+use vello::{
+    kurbo::{Affine, BezPath, Point, Rect},
+    peniko::{Brush, Color, Fill, Stroke},
+    RenderParams, RendererOptions, Scene, SceneBuilder,
+};
+
 use glazier::kurbo::Size;
 use glazier::{
     Application, Cursor, FileDialogToken, FileInfo, IdleToken, KeyEvent, PenInclination,
     PointerEvent, PointerId, PointerType, Region, Scalable, TimerToken, WinHandler, WindowHandle,
-};
-use kurbo::Ellipse;
-use parley::Layout;
-use std::any::Any;
-use std::collections::HashMap;
-use std::f64::consts::PI;
-use vello::util::{RenderContext, RenderSurface};
-use vello::Renderer;
-use vello::{
-    glyph::{
-        pinot::{types::Tag, FontRef},
-        GlyphContext,
-    },
-    kurbo::{Affine, BezPath, Point, Rect},
-    peniko::{Brush, Color, Fill, Stroke},
-    Scene, SceneBuilder,
 };
 
 const WIDTH: usize = 2048;
@@ -95,11 +92,10 @@ impl WindowState {
     fn render(&mut self) {
         let (width, height) = self.surface_size();
         if self.surface.is_none() {
-            self.surface = Some(pollster::block_on(self.render.create_surface(
-                &self.handle,
-                width,
-                height,
-            )));
+            self.surface = Some(
+                pollster::block_on(self.render.create_surface(&self.handle, width, height))
+                    .expect("failed to create surface"),
+            );
         }
 
         render_anim_frame(&mut self.scene, self.pen_state.as_ref(), &self.touch_state);
@@ -112,9 +108,18 @@ impl WindowState {
             let dev_id = surface.dev_id;
             let device = &self.render.devices[dev_id].device;
             let queue = &self.render.devices[dev_id].queue;
+            let renderer_options = RendererOptions {
+                surface_format: Some(surface.format),
+                timestamp_period: queue.get_timestamp_period(),
+            };
+            let render_params = RenderParams {
+                base_color: Color::BLACK,
+                width,
+                height,
+            };
             self.renderer
-                .get_or_insert_with(|| Renderer::new(device).unwrap())
-                .render_to_surface(device, queue, &self.scene, &surface_texture, width, height)
+                .get_or_insert_with(|| Renderer::new(device, &renderer_options).unwrap())
+                .render_to_surface(device, queue, &self.scene, &surface_texture, &render_params)
                 .unwrap();
             surface_texture.present();
         }
@@ -158,11 +163,11 @@ impl WinHandler for WindowState {
         println!("keyup: {event:?}");
     }
 
-    fn wheel(&mut self, event: &PointerEvent) {
+    fn wheel(&mut self, event: PointerEvent) {
         println!("wheel {event:?}");
     }
 
-    fn pointer_move(&mut self, event: &PointerEvent) {
+    fn pointer_move(&mut self, event: PointerEvent) {
         self.handle.set_cursor(&Cursor::Arrow);
         match &event.pointer_type {
             PointerType::Pen(info) => {
@@ -183,7 +188,7 @@ impl WinHandler for WindowState {
         }
     }
 
-    fn pointer_down(&mut self, event: &PointerEvent) {
+    fn pointer_down(&mut self, event: PointerEvent) {
         if let PointerType::Touch(_) = &event.pointer_type {
             let color = if event.is_primary {
                 Color::RED
@@ -198,7 +203,7 @@ impl WinHandler for WindowState {
         }
     }
 
-    fn pointer_up(&mut self, event: &PointerEvent) {
+    fn pointer_up(&mut self, event: PointerEvent) {
         if let PointerType::Touch(_) = &event.pointer_type {
             self.touch_state.points.remove(&event.pointer_id);
         }
@@ -234,47 +239,6 @@ impl WinHandler for WindowState {
 
     fn as_any(&mut self) -> &mut dyn Any {
         self
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ParleyBrush(pub Brush);
-
-impl Default for ParleyBrush {
-    fn default() -> ParleyBrush {
-        ParleyBrush(Brush::Solid(Color::rgb8(0, 0, 0)))
-    }
-}
-
-impl parley::style::Brush for ParleyBrush {}
-
-pub fn render_text(builder: &mut SceneBuilder, transform: Affine, layout: &Layout<ParleyBrush>) {
-    let mut gcx = GlyphContext::new();
-    for line in layout.lines() {
-        for glyph_run in line.glyph_runs() {
-            let mut x = glyph_run.offset();
-            let y = glyph_run.baseline();
-            let run = glyph_run.run();
-            let font = run.font().as_ref();
-            let font_size = run.font_size();
-            let font_ref = FontRef {
-                data: font.data,
-                offset: font.offset,
-            };
-            let style = glyph_run.style();
-            let vars: [(Tag, f32); 0] = [];
-            let mut gp = gcx.new_provider(&font_ref, None, font_size, false, vars);
-            for glyph in glyph_run.glyphs() {
-                if let Some(fragment) = gp.get(glyph.id, Some(&style.brush.0)) {
-                    let gx = x + glyph.x;
-                    let gy = y - glyph.y;
-                    let xform = Affine::translate((gx as f64, gy as f64))
-                        * Affine::scale_non_uniform(1.0, -1.0);
-                    builder.append(&fragment, Some(transform * xform));
-                }
-                x += glyph.advance;
-            }
-        }
     }
 }
 

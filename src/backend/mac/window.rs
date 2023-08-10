@@ -60,7 +60,10 @@ use super::util::{assert_main_thread, make_nsstring};
 use crate::common_util::IdleCallback;
 use crate::dialog::{FileDialogOptions, FileDialogType};
 use crate::keyboard_types::KeyState;
-use crate::mouse::{Cursor, CursorDesc, MouseButton, MouseButtons, MouseEvent};
+use crate::mouse::{Cursor, CursorDesc};
+use crate::pointer::{
+    MouseInfo, PointerButton, PointerButtons, PointerEvent, PointerId, PointerType,
+};
 use crate::region::Region;
 use crate::scale::Scale;
 use crate::text::{Event, InputHandler};
@@ -101,7 +104,7 @@ mod levels {
 
 #[derive(Clone)]
 pub(crate) struct WindowHandle {
-    /// This is an NSView, as our concept of "window" is more the top-level container holding
+    /// This is an `NSView`, as our concept of "window" is more the top-level container holding
     /// a view. Also, this is better for hosted applications such as VST.
     nsview: WeakPtr,
     idle_queue: Weak<Mutex<Vec<IdleKind>>>,
@@ -175,7 +178,7 @@ enum IdleKind {
     DeferredOp(DeferredOp),
 }
 
-/// This is the state associated with our custom NSView.
+/// This is the state associated with our custom `NSView`.
 struct ViewState {
     nswindow: WeakPtr,
     nsview: WeakPtr,
@@ -316,7 +319,7 @@ impl WindowBuilder {
             view.initWithFrame_(frame);
 
             // The rect of the tracking area doesn't matter, because
-            // we use the InVisibleRect option where the OS syncs the size automatically.
+            // we use the `InVisibleRect` option where the OS syncs the size automatically.
             let rect = NSRect::new(NSPoint::new(0., 0.), NSSize::new(0., 0.));
             let opts = NSTrackingAreaOptions::MouseEnteredAndExited
                 | NSTrackingAreaOptions::MouseMoved
@@ -371,7 +374,7 @@ impl WindowBuilder {
     }
 }
 
-// Wrap pointer because lazy_static requires Sync.
+// Wrap pointer because lazy_static requires [`Sync`].
 struct ViewClass(*const Class);
 unsafe impl Sync for ViewClass {}
 unsafe impl Send for ViewClass {}
@@ -691,59 +694,58 @@ extern "C" fn set_frame_size(this: &mut Object, _: Sel, size: NSSize) {
     }
 }
 
-fn mouse_event(
+fn mouse_pointer_event(
     nsevent: id,
     view: id,
     count: u8,
     focus: bool,
-    button: MouseButton,
+    button: PointerButton,
     wheel_delta: Vec2,
-) -> MouseEvent {
+) -> PointerEvent {
     unsafe {
         let point = nsevent.locationInWindow();
         let view_point = view.convertPoint_fromView_(point, nil);
-        let pos = Point::new(view_point.x, view_point.y);
-        let buttons = get_mouse_buttons(NSEvent::pressedMouseButtons(nsevent));
-        let modifiers = make_modifiers(nsevent.modifierFlags());
-        MouseEvent {
-            pos,
-            buttons,
-            mods: modifiers,
-            count,
-            focus,
+        PointerEvent {
+            pointer_id: PointerId(0),
+            is_primary: true,
+            pointer_type: PointerType::Mouse(MouseInfo { wheel_delta }),
+            pos: Point::new(view_point.x, view_point.y),
+            buttons: get_mouse_buttons(NSEvent::pressedMouseButtons(nsevent)),
+            modifiers: make_modifiers(nsevent.modifierFlags()),
             button,
-            wheel_delta,
+            focus,
+            count,
         }
     }
 }
 
-fn get_mouse_button(button: NSInteger) -> Option<MouseButton> {
+fn get_mouse_button(button: NSInteger) -> Option<PointerButton> {
     match button {
-        0 => Some(MouseButton::Left),
-        1 => Some(MouseButton::Right),
-        2 => Some(MouseButton::Middle),
-        3 => Some(MouseButton::X1),
-        4 => Some(MouseButton::X2),
+        0 => Some(PointerButton::Primary),
+        1 => Some(PointerButton::Secondary),
+        2 => Some(PointerButton::Auxiliary),
+        3 => Some(PointerButton::X1),
+        4 => Some(PointerButton::X2),
         _ => None,
     }
 }
 
-fn get_mouse_buttons(mask: NSUInteger) -> MouseButtons {
-    let mut buttons = MouseButtons::new();
+fn get_mouse_buttons(mask: NSUInteger) -> PointerButtons {
+    let mut buttons = PointerButtons::new();
     if mask & 1 != 0 {
-        buttons.insert(MouseButton::Left);
+        buttons.insert(PointerButton::Primary);
     }
     if mask & 1 << 1 != 0 {
-        buttons.insert(MouseButton::Right);
+        buttons.insert(PointerButton::Secondary);
     }
     if mask & 1 << 2 != 0 {
-        buttons.insert(MouseButton::Middle);
+        buttons.insert(PointerButton::Auxiliary);
     }
     if mask & 1 << 3 != 0 {
-        buttons.insert(MouseButton::X1);
+        buttons.insert(PointerButton::X1);
     }
     if mask & 1 << 4 != 0 {
-        buttons.insert(MouseButton::X2);
+        buttons.insert(PointerButton::X2);
     }
     buttons
 }
@@ -779,11 +781,11 @@ fn check_if_layer_delegate_install_needed(view: *mut Object, view_state: &mut Vi
 }
 
 extern "C" fn mouse_down_left(this: &mut Object, _: Sel, nsevent: id) {
-    mouse_down(this, nsevent, MouseButton::Left);
+    mouse_down(this, nsevent, PointerButton::Primary);
 }
 
 extern "C" fn mouse_down_right(this: &mut Object, _: Sel, nsevent: id) {
-    mouse_down(this, nsevent, MouseButton::Right);
+    mouse_down(this, nsevent, PointerButton::Secondary);
 }
 
 extern "C" fn mouse_down_other(this: &mut Object, _: Sel, nsevent: id) {
@@ -794,23 +796,23 @@ extern "C" fn mouse_down_other(this: &mut Object, _: Sel, nsevent: id) {
     }
 }
 
-fn mouse_down(this: &mut Object, nsevent: id, button: MouseButton) {
+fn mouse_down(this: &mut Object, nsevent: id, button: PointerButton) {
     unsafe {
         let view_state: *mut c_void = *this.get_ivar("viewState");
         let view_state = &mut *(view_state as *mut ViewState);
         let count = nsevent.clickCount() as u8;
-        let focus = view_state.focus_click && button == MouseButton::Left;
-        let event = mouse_event(nsevent, this as id, count, focus, button, Vec2::ZERO);
-        view_state.handler.mouse_down(&event);
+        let focus = view_state.focus_click && button == PointerButton::Primary;
+        let event = mouse_pointer_event(nsevent, this as id, count, focus, button, Vec2::ZERO);
+        view_state.handler.pointer_down(event);
     }
 }
 
 extern "C" fn mouse_up_left(this: &mut Object, _: Sel, nsevent: id) {
-    mouse_up(this, nsevent, MouseButton::Left);
+    mouse_up(this, nsevent, PointerButton::Primary);
 }
 
 extern "C" fn mouse_up_right(this: &mut Object, _: Sel, nsevent: id) {
-    mouse_up(this, nsevent, MouseButton::Right);
+    mouse_up(this, nsevent, PointerButton::Secondary);
 }
 
 extern "C" fn mouse_up_other(this: &mut Object, _: Sel, nsevent: id) {
@@ -821,25 +823,26 @@ extern "C" fn mouse_up_other(this: &mut Object, _: Sel, nsevent: id) {
     }
 }
 
-fn mouse_up(this: &mut Object, nsevent: id, button: MouseButton) {
+fn mouse_up(this: &mut Object, nsevent: id, button: PointerButton) {
     unsafe {
         let view_state: *mut c_void = *this.get_ivar("viewState");
         let view_state = &mut *(view_state as *mut ViewState);
-        let focus = if view_state.focus_click && button == MouseButton::Left {
+        let focus = if view_state.focus_click && button == PointerButton::Primary {
             view_state.focus_click = false;
             true
         } else {
             false
         };
-        let event = mouse_event(nsevent, this as id, 0, focus, button, Vec2::ZERO);
-        view_state.handler.mouse_up(&event);
+        let event = mouse_pointer_event(nsevent, this as id, 0, focus, button, Vec2::ZERO);
+        let buttons = event.buttons; // Copy for check after event is consumed.
+        view_state.handler.pointer_up(event);
         // If we have already received a mouseExited event then that means
         // we're still receiving mouse events because some buttons are being held down.
         // When the last held button is released and we haven't received a mouseEntered event,
         // then we will no longer receive mouse events until the next mouseEntered event
         // and need to inform the handler of the mouse leaving.
-        if view_state.mouse_left && event.buttons.is_empty() {
-            view_state.handler.mouse_leave();
+        if view_state.mouse_left && buttons.is_empty() {
+            view_state.handler.pointer_leave();
         }
     }
 }
@@ -848,8 +851,15 @@ extern "C" fn mouse_move(this: &mut Object, _: Sel, nsevent: id) {
     unsafe {
         let view_state: *mut c_void = *this.get_ivar("viewState");
         let view_state = &mut *(view_state as *mut ViewState);
-        let event = mouse_event(nsevent, this as id, 0, false, MouseButton::None, Vec2::ZERO);
-        view_state.handler.mouse_move(&event);
+        let event = mouse_pointer_event(
+            nsevent,
+            this as id,
+            0,
+            false,
+            PointerButton::None,
+            Vec2::ZERO,
+        );
+        view_state.handler.pointer_move(event);
     }
 }
 
@@ -858,8 +868,8 @@ extern "C" fn mouse_enter(this: &mut Object, _sel: Sel, nsevent: id) {
         let view_state: *mut c_void = *this.get_ivar("viewState");
         let view_state = &mut *(view_state as *mut ViewState);
         view_state.mouse_left = false;
-        let event = mouse_event(nsevent, this, 0, false, MouseButton::None, Vec2::ZERO);
-        view_state.handler.mouse_move(&event);
+        let event = mouse_pointer_event(nsevent, this, 0, false, PointerButton::None, Vec2::ZERO);
+        view_state.handler.pointer_move(event);
     }
 }
 
@@ -868,7 +878,7 @@ extern "C" fn mouse_leave(this: &mut Object, _: Sel, _nsevent: id) {
         let view_state: *mut c_void = *this.get_ivar("viewState");
         let view_state = &mut *(view_state as *mut ViewState);
         view_state.mouse_left = true;
-        view_state.handler.mouse_leave();
+        view_state.handler.pointer_leave();
     }
 }
 
@@ -886,15 +896,15 @@ extern "C" fn scroll_wheel(this: &mut Object, _: Sel, nsevent: id) {
             }
         };
 
-        let event = mouse_event(
+        let event = mouse_pointer_event(
             nsevent,
             this as id,
             0,
             false,
-            MouseButton::None,
+            PointerButton::None,
             Vec2::new(dx, dy),
         );
-        view_state.handler.mouse_wheel(&event);
+        view_state.handler.wheel(event);
     }
 }
 
@@ -1644,7 +1654,7 @@ impl ViewState {
     }
 }
 
-/// Convert an `Instant` into an NSTimeInterval, i.e. a fractional number
+/// Convert an `Instant` into an `NSTimeInterval`, i.e. a fractional number
 /// of seconds from now.
 ///
 /// This may lose some precision for multi-month durations.

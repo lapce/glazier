@@ -25,8 +25,9 @@ use std::time::Instant;
 use accesskit_macos::Adapter as AccessKitAdapter;
 use block::ConcreteBlock;
 use cocoa::appkit::{
-    CGFloat, NSApp, NSApplication, NSAutoresizingMaskOptions, NSBackingStoreBuffered, NSColor,
-    NSEvent, NSView, NSViewHeightSizable, NSViewWidthSizable, NSWindow, NSWindowStyleMask,
+    self, CGFloat, NSApp, NSApplication, NSAutoresizingMaskOptions, NSBackingStoreBuffered,
+    NSColor, NSEvent, NSToolbar, NSView, NSViewHeightSizable, NSViewWidthSizable, NSWindow,
+    NSWindowStyleMask,
 };
 use cocoa::base::{id, nil, BOOL, NO, YES};
 use cocoa::foundation::{
@@ -281,6 +282,10 @@ impl WindowBuilder {
 
             if self.show_titlebar {
                 style_mask |= NSWindowStyleMask::NSTitledWindowMask;
+            } else {
+                style_mask |= NSWindowStyleMask::NSTitledWindowMask
+                    | NSWindowStyleMask::NSFullSizeContentViewWindowMask
+                    | NSWindowStyleMask::NSUnifiedTitleAndToolbarWindowMask;
             }
 
             if self.resizable {
@@ -300,6 +305,15 @@ impl WindowBuilder {
                 NSBackingStoreBuffered,
                 NO,
             );
+
+            if !self.show_titlebar {
+                window.setTitlebarAppearsTransparent_(YES);
+                window.setTitleVisibility_(appkit::NSWindowTitleVisibility::NSWindowTitleHidden);
+                let toolbar = NSToolbar::alloc(nil);
+                toolbar.init_();
+                window.setToolbar_(toolbar);
+                window.setMovable_(NO);
+            }
 
             if let Some(min_size) = self.min_size {
                 let size = NSSize::new(min_size.width, min_size.height);

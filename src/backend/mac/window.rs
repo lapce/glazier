@@ -191,6 +191,7 @@ struct ViewState {
     mouse_left: bool,
     /// Tracks whether we've installed a delegate on the sublayer
     installed_layer_delegate: bool,
+    handle_titlebar: bool,
     keyboard_state: KeyboardState,
     active_text_input: Option<TextFieldToken>,
     parent: Option<crate::WindowHandle>,
@@ -412,6 +413,21 @@ lazy_static! {
         extern "C" fn acceptsFirstResponder(_this: &Object, _sel: Sel) -> BOOL {
             YES
         }
+
+        decl.add_method(
+            sel!(window:willUseFullScreenPresentationOptions:),
+            will_use_full_screen_presentation_options
+                as extern "C" fn(&Object, Sel, *mut c_void, NSUInteger) -> NSUInteger,
+        );
+        extern "C" fn will_use_full_screen_presentation_options(
+            _this: &Object,
+            _sel: Sel,
+            _v: *mut c_void,
+            _options: NSUInteger,
+        ) -> NSUInteger {
+            1 << 11 | 1 << 2 | 1 << 10
+        }
+
         // acceptsFirstMouse is called when a left mouse click would focus the window
         decl.add_method(
             sel!(acceptsFirstMouse:),
@@ -667,6 +683,7 @@ fn make_view(window: id, handler: Box<dyn WinHandler>) -> (id, Weak<Mutex<Vec<Id
             keyboard_state,
             //text: PietText::new_with_unique_state(),
             active_text_input: None,
+            handle_titlebar: false,
             parent: None,
             #[cfg(feature = "accesskit")]
             accesskit_adapter: OnceCell::new(),
@@ -818,6 +835,11 @@ fn mouse_down(this: &mut Object, nsevent: id, button: PointerButton) {
         let focus = view_state.focus_click && button == PointerButton::Primary;
         let event = mouse_pointer_event(nsevent, this as id, count, focus, button, Vec2::ZERO);
         view_state.handler.pointer_down(event);
+
+        if count == 1 && button == PointerButton::Primary && view_state.handle_titlebar {
+            let window: id = msg_send![this, window];
+            let _: () = msg_send![ window, performWindowDragWithEvent: nsevent ];
+        }
     }
 }
 
@@ -1498,8 +1520,15 @@ impl WindowHandle {
         }
     }
 
-    pub fn handle_titlebar(&self, _val: bool) {
-        tracing::warn!("WindowHandle::handle_titlebar is currently unimplemented for Mac.");
+    pub fn handle_titlebar(&self, val: bool) {
+        unsafe {
+            let view = self.nsview.load();
+            if let Some(view) = (*view).as_ref() {
+                let state: *mut c_void = *view.get_ivar("viewState");
+                let state = &mut (*(state as *mut ViewState));
+                state.handle_titlebar = val;
+            }
+        }
     }
 
     pub fn resizable(&self, resizable: bool) {

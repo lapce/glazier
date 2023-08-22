@@ -26,7 +26,7 @@ use accesskit_macos::Adapter as AccessKitAdapter;
 use block::ConcreteBlock;
 use cocoa::appkit::{
     self, CGFloat, NSApp, NSApplication, NSAutoresizingMaskOptions, NSBackingStoreBuffered,
-    NSColor, NSEvent, NSToolbar, NSView, NSViewHeightSizable, NSViewWidthSizable, NSWindow,
+    NSColor, NSEvent, NSView, NSViewHeightSizable, NSViewWidthSizable, NSWindow, NSWindowButton,
     NSWindowStyleMask,
 };
 use cocoa::base::{id, nil, BOOL, NO, YES};
@@ -191,6 +191,7 @@ struct ViewState {
     mouse_left: bool,
     /// Tracks whether we've installed a delegate on the sublayer
     installed_layer_delegate: bool,
+    show_titlebar: bool,
     handle_titlebar: bool,
     keyboard_state: KeyboardState,
     active_text_input: Option<TextFieldToken>,
@@ -307,15 +308,6 @@ impl WindowBuilder {
                 NO,
             );
 
-            if !self.show_titlebar {
-                window.setTitlebarAppearsTransparent_(YES);
-                window.setTitleVisibility_(appkit::NSWindowTitleVisibility::NSWindowTitleHidden);
-                let toolbar = NSToolbar::alloc(nil);
-                toolbar.init_();
-                window.setToolbar_(toolbar);
-                window.setMovable_(NO);
-            }
-
             if let Some(min_size) = self.min_size {
                 let size = NSSize::new(min_size.width, min_size.height);
                 window.setContentMinSize_(size);
@@ -383,6 +375,15 @@ impl WindowBuilder {
                 .size(Size::new(frame.size.width, frame.size.height));
 
             check_if_layer_delegate_install_needed(view, view_state);
+
+            if !self.show_titlebar {
+                view_state.show_titlebar = false;
+                window.setTitlebarAppearsTransparent_(YES);
+                window.setTitleVisibility_(appkit::NSWindowTitleVisibility::NSWindowTitleHidden);
+                window.setMovable_(NO);
+
+                position_traffic_lights(window);
+            }
 
             Ok(handle)
         }
@@ -554,6 +555,10 @@ lazy_static! {
             sel!(windowDidMove:),
             window_did_move as extern "C" fn(&mut Object, Sel, id),
         );
+        decl.add_method(
+            sel!(windowDidExitFullScreen:),
+            window_did_exit_fullscreen as extern "C" fn(&mut Object, Sel, id),
+        );
 
         #[cfg(feature = "accesskit")]
         {
@@ -683,6 +688,7 @@ fn make_view(window: id, handler: Box<dyn WinHandler>) -> (id, Weak<Mutex<Vec<Id
             keyboard_state,
             //text: PietText::new_with_unique_state(),
             active_text_input: None,
+            show_titlebar: true,
             handle_titlebar: false,
             parent: None,
             #[cfg(feature = "accesskit")]
@@ -722,6 +728,11 @@ extern "C" fn set_frame_size(this: &mut Object, _: Sel, size: NSSize) {
         view_state.handler.size(Size::new(size.width, size.height));
         let superclass = msg_send![this, superclass];
         let () = msg_send![super(this, superclass), setFrameSize: size];
+
+        if !view_state.show_titlebar {
+            let window: id = msg_send![this, window];
+            position_traffic_lights(window);
+        }
     }
 }
 
@@ -1188,6 +1199,18 @@ extern "C" fn window_did_move(this: &mut Object, _: Sel, _notification: id) {
     }
 }
 
+extern "C" fn window_did_exit_fullscreen(this: &mut Object, _: Sel, _notification: id) {
+    unsafe {
+        let view_state: *mut c_void = *this.get_ivar("viewState");
+        let view_state = &mut *(view_state as *mut ViewState);
+
+        if !view_state.show_titlebar {
+            let window: id = msg_send![this, window];
+            position_traffic_lights(window);
+        }
+    }
+}
+
 unsafe fn request_anim_frame(view: *mut Object) {
     // TODO: synchronize with screen refresh rate using CVDisplayLink instead.
     let () = msg_send![view, performSelectorOnMainThread: sel!(redraw)
@@ -1385,6 +1408,13 @@ impl WindowHandle {
             let window: id = msg_send![*self.nsview.load(), window];
             let title = make_nsstring(title);
             window.setTitle_(title);
+            if let Some(view) = self.nsview.load().as_ref() {
+                let state: *mut c_void = *view.get_ivar("viewState");
+                let state = &mut (*(state as *mut ViewState));
+                if !state.show_titlebar {
+                    position_traffic_lights(window);
+                }
+            }
         }
     }
 
@@ -1710,5 +1740,31 @@ fn time_interval_from_deadline(deadline: Instant) -> f64 {
         let secs = t.as_secs() as f64;
         let subsecs = f64::from(t.subsec_micros()) * 0.000_001;
         secs + subsecs
+    }
+}
+
+unsafe fn position_traffic_lights<W: NSWindow + Copy>(window: W) {
+    unsafe {
+        let close = window.standardWindowButton_(NSWindowButton::NSWindowCloseButton);
+        let miniaturize = window.standardWindowButton_(NSWindowButton::NSWindowMiniaturizeButton);
+        let zoom = window.standardWindowButton_(NSWindowButton::NSWindowZoomButton);
+
+        let title_bar_container_view = close.superview().superview();
+
+        let close_rect = NSView::frame(close);
+        let title_bar_frame_height = close_rect.size.height + 17.0;
+        let mut title_bar_rect = NSView::frame(title_bar_container_view);
+        title_bar_rect.size.height = title_bar_frame_height;
+        title_bar_rect.origin.y = window.frame().size.height - title_bar_frame_height;
+        let _: () = msg_send![title_bar_container_view, setFrame: title_bar_rect];
+
+        let window_buttons = vec![close, miniaturize, zoom];
+        let space_between = NSView::frame(miniaturize).origin.x - close_rect.origin.x;
+
+        for (i, button) in window_buttons.into_iter().enumerate() {
+            let mut rect = NSView::frame(button);
+            rect.origin.x = 12.0 + (i as f64 * space_between);
+            button.setFrameOrigin(rect.origin);
+        }
     }
 }

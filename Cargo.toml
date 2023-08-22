@@ -24,7 +24,7 @@ default-target = "x86_64-pc-windows-msvc"
 cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]
 
 [features]
-default = ["x11", "wayland"]
+default = ["x11"]
 x11 = ["ashpd", "bindgen", "futures", "nix", "pkg-config", "x11rb"]
 wayland = [
     # Required for XKBCommon
@@ -34,8 +34,6 @@ wayland = [
     "smithay-client-toolkit",
     "wayland-backend",
 ]
-
-serde = ["kurbo/serde"]
 
 accesskit = [
     "dep:accesskit",
@@ -53,7 +51,7 @@ lazy_static = "1.4.0"
 cfg-if = "1.0.0"
 instant = { version = "0.1.6", features = ["wasm-bindgen"] }
 anyhow = "1.0.32"
-keyboard-types = { version = "0.6.2", default_features = false }
+keyboard-types = { version = "0.7", default_features = false }
 memchr = "2.5"
 
 # Optional dependencies
@@ -85,6 +83,7 @@ features = [
     "winbase",
     "winerror",
     "handleapi",
+    "shellapi",
     "winnls",
 ]
 

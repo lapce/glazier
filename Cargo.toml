@@ -44,7 +44,7 @@ accesskit = [
 
 [dependencies]
 # Moving forward, this version should align with the kurbo version in peniko.
-kurbo = "0.9.0"
+kurbo = { version = "0.9.0", features = ["serde"] }
 
 tracing = { version = "0.1.22", features = ["log"] }
 lazy_static = "1.4.0"
